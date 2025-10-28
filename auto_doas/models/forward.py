@@ -114,39 +114,61 @@ class AutoDOASForwardModel(nn.Module):
         nuisance_params = self.nuisance_head(nuisance_input)
         gain = torch.nn.functional.softplus(nuisance_params[:, 0]) + 1e-3
         offset = nuisance_params[:, 1]
-        stray_light = torch.sigmoid(nuisance_params[:, 2]) * 0.05
+        predicted_stray = torch.sigmoid(nuisance_params[:, 2]) * 0.05
 
         if instrument_parameters is not None:
-            offsets = torch.tensor(
-                [instrument_parameters[int(i.item())].wavelength_offset_nm for i in instrument_ids],
-                device=device,
+            offsets_list = []
+            scales_list = []
+            lsf_width_list = []
+            stray_list = []
+            nonlinear_list = []
+            for instrument_idx in instrument_ids.tolist():
+                params = instrument_parameters[int(instrument_idx)].clamp()
+                offsets_list.append(params.wavelength_offset_nm)
+                scales_list.append(params.wavelength_scale)
+                lsf_width_list.append(params.lsf_width_px)
+                stray_list.append(params.stray_light_fraction)
+                nonlinear_list.append(params.nonlinear_response)
+            offsets = torch.tensor(offsets_list, device=device, dtype=base_wavelengths.dtype)
+            scales = torch.tensor(scales_list, device=device, dtype=base_wavelengths.dtype)
+            lsf_width = torch.tensor(lsf_width_list, device=device, dtype=base_wavelengths.dtype)
+            instrument_stray = torch.tensor(
+                stray_list, device=device, dtype=base_wavelengths.dtype
             )
-            scales = torch.tensor(
-                [instrument_parameters[int(i.item())].wavelength_scale for i in instrument_ids],
-                device=device,
-            )
-            lsf_width = torch.tensor(
-                [instrument_parameters[int(i.item())].lsf_width_px for i in instrument_ids],
-                device=device,
+            instrument_nonlinear = torch.tensor(
+                nonlinear_list, device=device, dtype=base_wavelengths.dtype
             )
         else:
-            offsets = torch.zeros(batch_size, device=device)
-            scales = torch.ones(batch_size, device=device)
-            lsf_width = torch.ones(batch_size, device=device)
+            offsets = torch.zeros(batch_size, device=device, dtype=base_wavelengths.dtype)
+            scales = torch.ones(batch_size, device=device, dtype=base_wavelengths.dtype)
+            lsf_width = torch.ones(batch_size, device=device, dtype=base_wavelengths.dtype)
+            instrument_stray = torch.zeros(
+                batch_size, device=device, dtype=base_wavelengths.dtype
+            )
+            instrument_nonlinear = torch.zeros(
+                batch_size, device=device, dtype=base_wavelengths.dtype
+            )
 
         wavelengths = base_wavelengths[None, :] * scales[:, None] + offsets[:, None]
 
         kernel = gaussian_kernel(lsf_width, self.kernel_size)
         padded = F.pad(differential[:, None, :], (self.kernel_size // 2, self.kernel_size // 2), mode="replicate")
         convolved = F.conv1d(padded, kernel[:, None, :], groups=batch_size)[:, 0, :]
-        simulated = torch.exp(-convolved)
-        simulated = gain[:, None] * simulated + offset[:, None]
-        simulated = (1 - stray_light[:, None]) * simulated + stray_light[:, None] * simulated.mean(dim=1, keepdim=True)
+        absorption_counts = torch.exp(-convolved)
+        post_gain_counts = gain[:, None] * absorption_counts + offset[:, None]
+        nonlinear_counts = post_gain_counts + instrument_nonlinear[:, None] * post_gain_counts**2
+        total_stray = torch.clamp(predicted_stray + instrument_stray, 0.0, 0.2)
+        simulated = (1 - total_stray[:, None]) * nonlinear_counts + total_stray[:, None] * nonlinear_counts.mean(dim=1, keepdim=True)
         diagnostics = {
             "optical_depth": differential.detach(),
             "gain": gain.detach(),
             "offset": offset.detach(),
-            "stray_light": stray_light.detach(),
+            "stray_light": total_stray.detach(),
             "wavelengths_nm": wavelengths.detach(),
+            "predicted_stray_light": predicted_stray.detach(),
+            "instrument_stray_light": instrument_stray.detach(),
+            "instrument_nonlinearity": instrument_nonlinear.detach(),
+            "post_gain_counts": post_gain_counts.detach(),
+            "pre_stray_counts": nonlinear_counts.detach(),
         }
         return simulated, diagnostics
