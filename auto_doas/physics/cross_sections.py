@@ -15,6 +15,23 @@ import numpy as np
 import torch
 
 
+def _linear_interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
+    """Torch-compatible 1D linear interpolation."""
+
+    if hasattr(torch, "interp"):
+        return torch.interp(x, xp, fp)
+
+    x = x.clamp(min=float(xp[0]), max=float(xp[-1]))
+    indices = torch.searchsorted(xp, x, right=False)
+    indices = torch.clamp(indices, 1, xp.numel() - 1)
+    x0 = torch.gather(xp, 0, indices - 1)
+    x1 = torch.gather(xp, 0, indices)
+    f0 = torch.gather(fp, 0, indices - 1)
+    f1 = torch.gather(fp, 0, indices)
+    weight = (x - x0) / (x1 - x0 + 1e-12)
+    return f0 + weight * (f1 - f0)
+
+
 @dataclass
 class CrossSection:
     """Holds cross section data for a single gas."""
@@ -96,7 +113,7 @@ class CrossSectionDatabase:
 
         sections: Dict[str, CrossSection] = {}
         for gas, section in self._sections.items():
-            absorption = torch.interp(
+            absorption = _linear_interp(
                 wavelengths_nm,
                 section.wavelengths_nm.to(wavelengths_nm.device),
                 section.absorption.to(wavelengths_nm.device),
