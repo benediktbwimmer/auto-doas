@@ -14,6 +14,7 @@ auto_doas/
 ├── models/encoder.py      # Neural encoder that predicts gas and nuisance latents
 ├── models/forward.py      # Differentiable forward model for spectral reconstruction
 ├── models/losses.py       # Composite unsupervised training losses
+├── retrieval.py           # High-level retrieval orchestration (Level-0 ↔ Level-2)
 ├── physics/cross_sections.py  # Cross-section data loading utilities
 └── train/trainer.py       # High-level training orchestrator
 ```
