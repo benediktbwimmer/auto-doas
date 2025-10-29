@@ -86,7 +86,7 @@ class AutoDOASForwardModel(nn.Module):
         self.nuisance_head = nn.Sequential(
             nn.Linear(embedding_dim + len(self.gases), 64),
             nn.GELU(),
-            nn.Linear(64, 3),
+            nn.Linear(64, 7),
         )
 
     def forward(
@@ -112,9 +112,13 @@ class AutoDOASForwardModel(nn.Module):
         instrument_embed = self.instrument_embedding(instrument_ids)
         nuisance_input = torch.cat([nuisance_latent, instrument_embed], dim=-1)
         nuisance_params = self.nuisance_head(nuisance_input)
-        gain = torch.nn.functional.softplus(nuisance_params[:, 0]) + 1e-3
+        gain = F.softplus(nuisance_params[:, 0]) + 1e-3
         offset = nuisance_params[:, 1]
-        predicted_stray = torch.sigmoid(nuisance_params[:, 2]) * 0.05
+        predicted_wavelength_offset = 0.05 * torch.tanh(nuisance_params[:, 2])
+        predicted_wavelength_scale = 1.0 + 0.005 * torch.tanh(nuisance_params[:, 3])
+        predicted_lsf_width = torch.clamp(F.softplus(nuisance_params[:, 4]) + 1e-3, 0.2, 5.0)
+        predicted_stray = torch.sigmoid(nuisance_params[:, 5]) * 0.05
+        predicted_nonlinear = 0.02 * torch.tanh(nuisance_params[:, 6])
 
         if instrument_parameters is not None:
             offsets_list = []
@@ -139,9 +143,9 @@ class AutoDOASForwardModel(nn.Module):
                 nonlinear_list, device=device, dtype=base_wavelengths.dtype
             )
         else:
-            offsets = torch.zeros(batch_size, device=device, dtype=base_wavelengths.dtype)
-            scales = torch.ones(batch_size, device=device, dtype=base_wavelengths.dtype)
-            lsf_width = torch.ones(batch_size, device=device, dtype=base_wavelengths.dtype)
+            offsets = predicted_wavelength_offset
+            scales = predicted_wavelength_scale
+            lsf_width = predicted_lsf_width
             instrument_stray = torch.zeros(
                 batch_size, device=device, dtype=base_wavelengths.dtype
             )
@@ -150,8 +154,13 @@ class AutoDOASForwardModel(nn.Module):
             )
 
         wavelengths = base_wavelengths[None, :] * scales[:, None] + offsets[:, None]
+        applied_offsets = offsets
+        applied_scales = scales
+        applied_lsf = lsf_width
 
-        kernel = gaussian_kernel(lsf_width, self.kernel_size)
+        differential = self._resample_spectrum(differential, base_wavelengths, wavelengths)
+
+        kernel = gaussian_kernel(applied_lsf, self.kernel_size)
         padded = F.pad(
             differential[:, None, :],
             (self.kernel_size // 2, self.kernel_size // 2),
@@ -162,7 +171,8 @@ class AutoDOASForwardModel(nn.Module):
         convolved = convolved.transpose(0, 1)[:, 0, :]
         absorption_counts = torch.exp(-convolved)
         post_gain_counts = gain[:, None] * absorption_counts + offset[:, None]
-        nonlinear_counts = post_gain_counts + instrument_nonlinear[:, None] * post_gain_counts**2
+        total_nonlinear = torch.clamp(predicted_nonlinear + instrument_nonlinear, -0.04, 0.04)
+        nonlinear_counts = post_gain_counts + total_nonlinear[:, None] * post_gain_counts**2
         total_stray = torch.clamp(predicted_stray + instrument_stray, 0.0, 0.2)
         simulated = (1 - total_stray[:, None]) * nonlinear_counts + total_stray[:, None] * nonlinear_counts.mean(dim=1, keepdim=True)
         diagnostics = {
@@ -173,8 +183,46 @@ class AutoDOASForwardModel(nn.Module):
             "wavelengths_nm": wavelengths.detach(),
             "predicted_stray_light": predicted_stray.detach(),
             "instrument_stray_light": instrument_stray.detach(),
+            "predicted_wavelength_offset": predicted_wavelength_offset.detach(),
+            "predicted_wavelength_scale": predicted_wavelength_scale.detach(),
+            "predicted_lsf_width": predicted_lsf_width.detach(),
+            "applied_wavelength_offset": applied_offsets.detach(),
+            "applied_wavelength_scale": applied_scales.detach(),
+            "applied_lsf_width": applied_lsf.detach(),
+            "predicted_nonlinearity": predicted_nonlinear.detach(),
             "instrument_nonlinearity": instrument_nonlinear.detach(),
+            "total_nonlinearity": total_nonlinear.detach(),
             "post_gain_counts": post_gain_counts.detach(),
             "pre_stray_counts": nonlinear_counts.detach(),
         }
         return simulated, diagnostics
+
+    def _resample_spectrum(
+        self,
+        spectrum: torch.Tensor,
+        base_wavelengths: torch.Tensor,
+        target_wavelengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Resample ``spectrum`` defined on ``base_wavelengths`` onto ``target_wavelengths``."""
+
+        if spectrum.ndim != 2:
+            raise ValueError("spectrum must have shape [batch, num_wavelengths]")
+        base_min = float(base_wavelengths[0])
+        base_max = float(base_wavelengths[-1])
+        if base_max - base_min <= 0:
+            raise ValueError("base_wavelengths must span a non-zero interval")
+
+        normalized = (target_wavelengths - base_min) / (base_max - base_min)
+        normalized = normalized * 2 - 1
+        normalized = torch.clamp(normalized, -1.0, 1.0)
+        zeros = torch.zeros_like(normalized)
+        grid = torch.stack([zeros, normalized], dim=-1)[:, None, :, :]
+        input_tensor = spectrum[:, None, None, :]
+        resampled = F.grid_sample(
+            input_tensor,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        )
+        return resampled[:, 0, 0, :]
