@@ -134,43 +134,45 @@ class AutoDOASForwardModel(nn.Module):
         predicted_stray = torch.sigmoid(nuisance_params[:, 5]) * 0.05
         predicted_nonlinear = 0.02 * torch.tanh(nuisance_params[:, 6])
 
+        applied_offsets = predicted_wavelength_offset.clone()
+        applied_scales = predicted_wavelength_scale.clone()
+        applied_lsf = predicted_lsf_width.clone()
+        instrument_stray = torch.zeros(batch_size, device=device, dtype=base_wavelengths.dtype)
+        instrument_nonlinear = torch.zeros(
+            batch_size, device=device, dtype=base_wavelengths.dtype
+        )
         if instrument_parameters is not None:
-            offsets_list = []
-            scales_list = []
-            lsf_width_list = []
-            stray_list = []
-            nonlinear_list = []
-            for instrument_idx in instrument_ids.tolist():
-                params = instrument_parameters[int(instrument_idx)].clamp()
-                offsets_list.append(params.wavelength_offset_nm)
-                scales_list.append(params.wavelength_scale)
-                lsf_width_list.append(params.lsf_width_px)
-                stray_list.append(params.stray_light_fraction)
-                nonlinear_list.append(params.nonlinear_response)
-            offsets = torch.tensor(offsets_list, device=device, dtype=base_wavelengths.dtype)
-            scales = torch.tensor(scales_list, device=device, dtype=base_wavelengths.dtype)
-            lsf_width = torch.tensor(lsf_width_list, device=device, dtype=base_wavelengths.dtype)
-            instrument_stray = torch.tensor(
-                stray_list, device=device, dtype=base_wavelengths.dtype
-            )
-            instrument_nonlinear = torch.tensor(
-                nonlinear_list, device=device, dtype=base_wavelengths.dtype
-            )
-        else:
-            offsets = predicted_wavelength_offset
-            scales = predicted_wavelength_scale
-            lsf_width = predicted_lsf_width
-            instrument_stray = torch.zeros(
+            offsets_override = torch.zeros(
                 batch_size, device=device, dtype=base_wavelengths.dtype
             )
-            instrument_nonlinear = torch.zeros(
+            scales_override = torch.ones(
                 batch_size, device=device, dtype=base_wavelengths.dtype
             )
+            lsf_override = torch.zeros(
+                batch_size, device=device, dtype=base_wavelengths.dtype
+            )
+            override_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
+            for idx, instrument_idx in enumerate(instrument_ids.tolist()):
+                params = None
+                key = int(instrument_idx)
+                try:
+                    params = instrument_parameters[key]
+                except KeyError:
+                    params = None
+                if params is None:
+                    continue
+                clamped = params.clamp()
+                override_mask[idx] = True
+                offsets_override[idx] = clamped.wavelength_offset_nm
+                scales_override[idx] = clamped.wavelength_scale
+                lsf_override[idx] = clamped.lsf_width_px
+                instrument_stray[idx] = clamped.stray_light_fraction
+                instrument_nonlinear[idx] = clamped.nonlinear_response
+            applied_offsets = torch.where(override_mask, offsets_override, applied_offsets)
+            applied_scales = torch.where(override_mask, scales_override, applied_scales)
+            applied_lsf = torch.where(override_mask, lsf_override, applied_lsf)
 
-        wavelengths = base_wavelengths[None, :] * scales[:, None] + offsets[:, None]
-        applied_offsets = offsets
-        applied_scales = scales
-        applied_lsf = lsf_width
+        wavelengths = base_wavelengths[None, :] * applied_scales[:, None] + applied_offsets[:, None]
 
         differential = self._resample_spectrum(differential, base_wavelengths, wavelengths)
 
