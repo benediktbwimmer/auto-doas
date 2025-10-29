@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from ..physics.atmosphere import rayleigh_optical_depth
 from ..physics.cross_sections import CrossSectionDatabase
 from ..physics.geometry import (
-    double_geometric_air_mass_factor,
     geometric_air_mass_factor,
+    exponential_air_mass_factor,
 )
 
 
@@ -75,6 +75,12 @@ class AutoDOASForwardModel(nn.Module):
         include_rayleigh: bool = True,
         rayleigh_pressure_hpa: float = 1013.25,
         rayleigh_temperature_k: float = 288.15,
+        air_mass_mode: str = "geometric",
+        air_mass_scale_height_km: float = 7.0,
+        air_mass_max_altitude_km: float = 60.0,
+        air_mass_earth_radius_km: float = 6371.0,
+        air_mass_num_samples: int = 256,
+        air_mass_max_angle_deg: float = 89.0,
     ) -> None:
         super().__init__()
         self.register_buffer("wavelengths_nm", wavelengths_nm.float())
@@ -105,6 +111,16 @@ class AutoDOASForwardModel(nn.Module):
             rayleigh = torch.zeros_like(rayleigh)
         self.register_buffer("rayleigh_optical_depth", rayleigh.float())
         self.include_rayleigh = include_rayleigh
+        if air_mass_mode not in {"geometric", "chapman"}:
+            raise ValueError("air_mass_mode must be 'geometric' or 'chapman'")
+        self.air_mass_mode = air_mass_mode
+        self.air_mass_scale_height_km = float(air_mass_scale_height_km)
+        self.air_mass_max_altitude_km = float(air_mass_max_altitude_km)
+        self.air_mass_earth_radius_km = float(air_mass_earth_radius_km)
+        self.air_mass_num_samples = int(air_mass_num_samples)
+        if self.air_mass_num_samples < 2:
+            raise ValueError("air_mass_num_samples must be at least 2")
+        self.air_mass_max_angle_deg = float(air_mass_max_angle_deg)
 
     def forward(
         self,
@@ -134,31 +150,54 @@ class AutoDOASForwardModel(nn.Module):
                     return value.to(device=device, dtype=gas_columns.dtype)
                 return torch.tensor(value, device=device, dtype=gas_columns.dtype)
 
-            solar_angles = _to_tensor(solar_zenith_angle)
-            viewing_angles = _to_tensor(viewing_zenith_angle)
-            relative_angles = _to_tensor(relative_azimuth_angle)
-            if solar_angles is not None:
-                solar_amf_component = geometric_air_mass_factor(solar_angles).to(
-                    device=device, dtype=gas_columns.dtype
-                )
-            if viewing_angles is not None:
-                viewing_amf_component = geometric_air_mass_factor(viewing_angles).to(
-                    device=device, dtype=gas_columns.dtype
-                )
-            if solar_amf_component is not None and viewing_amf_component is not None:
-                if relative_angles is not None:
-                    clamped_relative = torch.clamp(relative_angles, 0.0, 180.0)
-                    viewing_weight = 0.5 * (
-                        1.0 + torch.cos(torch.deg2rad(clamped_relative))
+            def _prepare(value: Optional[torch.Tensor | float | int]) -> Optional[torch.Tensor]:
+                tensor = _to_tensor(value)
+                if tensor is not None and tensor.ndim == 0:
+                    tensor = tensor.expand(batch_size)
+                return tensor
+
+            solar_angles = _prepare(solar_zenith_angle)
+            viewing_angles = _prepare(viewing_zenith_angle)
+            relative_angles = _prepare(relative_azimuth_angle)
+
+            def _compute_component(angle_tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+                if angle_tensor is None:
+                    return None
+                if self.air_mass_mode == "chapman":
+                    component = exponential_air_mass_factor(
+                        angle_tensor,
+                        scale_height_km=self.air_mass_scale_height_km,
+                        max_altitude_km=self.air_mass_max_altitude_km,
+                        earth_radius_km=self.air_mass_earth_radius_km,
+                        num_samples=self.air_mass_num_samples,
+                        max_angle_deg=self.air_mass_max_angle_deg,
                     )
                 else:
-                    viewing_weight = torch.ones_like(viewing_amf_component)
+                    component = geometric_air_mass_factor(
+                        angle_tensor, max_angle_deg=self.air_mass_max_angle_deg
+                    )
+                return component.to(device=device, dtype=gas_columns.dtype)
+
+            if solar_angles is not None:
+                solar_amf_component = _compute_component(solar_angles)
+                solar_amf_component = solar_amf_component.reshape(batch_size, -1)[:, 0]
+            if viewing_angles is not None:
+                viewing_amf_component = _compute_component(viewing_angles)
+                viewing_amf_component = viewing_amf_component.reshape(batch_size, -1)[:, 0]
+            if solar_amf_component is not None and viewing_amf_component is not None:
+                if relative_angles is not None:
+                    relative = relative_angles.to(device=device, dtype=gas_columns.dtype)
+                    relative = relative.reshape(batch_size, -1)[:, 0]
+                    relative = torch.clamp(relative, 0.0, 180.0)
+                    viewing_weight = 0.5 * (
+                        1.0 + torch.cos(torch.deg2rad(relative))
+                    )
+                else:
+                    viewing_weight = torch.ones(
+                        batch_size, device=device, dtype=gas_columns.dtype
+                    )
                 viewing_weight = viewing_weight.to(dtype=gas_columns.dtype)
-                air_mass = double_geometric_air_mass_factor(
-                    solar_angles,
-                    viewing_angles,
-                    relative_angles,
-                ).to(device=device, dtype=gas_columns.dtype)
+                air_mass = solar_amf_component + viewing_weight * viewing_amf_component
             elif solar_amf_component is not None:
                 air_mass = solar_amf_component
             elif viewing_amf_component is not None:

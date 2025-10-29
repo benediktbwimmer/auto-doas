@@ -94,4 +94,126 @@ def double_geometric_air_mass_factor(
     return solar + weight * viewing
 
 
-__all__ = ["geometric_air_mass_factor", "double_geometric_air_mass_factor"]
+def exponential_air_mass_factor(
+    zenith_angle_deg: TensorLike,
+    scale_height_km: float = 7.0,
+    max_altitude_km: float = 60.0,
+    earth_radius_km: float = 6371.0,
+    num_samples: int = 256,
+    max_angle_deg: float = 89.0,
+) -> torch.Tensor:
+    """Chapman-style air mass factor for an exponential atmosphere."""
+
+    if num_samples < 2:
+        raise ValueError("num_samples must be at least 2 for numerical integration")
+
+    if not isinstance(zenith_angle_deg, torch.Tensor):
+        angles = torch.tensor(float(zenith_angle_deg), dtype=torch.float32)
+    else:
+        angles = zenith_angle_deg.to(dtype=torch.float32)
+
+    device = angles.device
+    max_angle = torch.tensor(max_angle_deg, dtype=angles.dtype, device=device)
+    angles = torch.clamp(angles, 0.0, max_angle.item())
+
+    original_shape = angles.shape
+    angles_flat = angles.reshape(-1)
+    radians = torch.deg2rad(angles_flat)
+
+    radius = torch.tensor(earth_radius_km, dtype=angles.dtype, device=device)
+    scale_height = torch.tensor(scale_height_km, dtype=angles.dtype, device=device)
+    top_of_atmosphere = radius + torch.tensor(max_altitude_km, dtype=angles.dtype, device=device)
+
+    cosine = torch.cos(radians)
+    sine = torch.sin(radians)
+    term = torch.clamp(top_of_atmosphere**2 - (radius**2) * sine**2, min=1e-6)
+    path_length = -radius * cosine + torch.sqrt(term)
+    path_length = torch.clamp(path_length, min=1e-6)
+
+    samples = torch.linspace(
+        0.0, 1.0, steps=num_samples, dtype=angles.dtype, device=device
+    )
+    distances = path_length[:, None] * samples[None, :]
+    radial_distance = torch.sqrt(
+        radius**2 + distances**2 + 2.0 * radius * distances * cosine[:, None]
+    )
+    altitude = radial_distance - radius
+    density = torch.exp(-altitude / scale_height)
+    slant_column = torch.trapz(density, distances, dim=1)
+
+    vertical_column = scale_height * (
+        1.0
+        - torch.exp(
+            -torch.tensor(max_altitude_km, dtype=angles.dtype, device=device)
+            / scale_height
+        )
+    )
+    air_mass = (slant_column / vertical_column).reshape(original_shape)
+    return air_mass
+
+
+def double_exponential_air_mass_factor(
+    solar_zenith_angle_deg: TensorLike,
+    viewing_zenith_angle_deg: TensorLike,
+    relative_azimuth_angle_deg: Optional[TensorLike] = None,
+    scale_height_km: float = 7.0,
+    max_altitude_km: float = 60.0,
+    earth_radius_km: float = 6371.0,
+    num_samples: int = 256,
+    max_angle_deg: float = 89.0,
+) -> torch.Tensor:
+    """Two-leg air mass factor using an exponential atmosphere approximation."""
+
+    if not isinstance(solar_zenith_angle_deg, torch.Tensor):
+        solar = torch.tensor(float(solar_zenith_angle_deg), dtype=torch.float32)
+    else:
+        solar = solar_zenith_angle_deg.to(dtype=torch.float32)
+    if not isinstance(viewing_zenith_angle_deg, torch.Tensor):
+        viewing = torch.tensor(float(viewing_zenith_angle_deg), dtype=torch.float32)
+    else:
+        viewing = viewing_zenith_angle_deg.to(dtype=torch.float32)
+
+    solar, viewing = torch.broadcast_tensors(solar, viewing)
+    solar_factor = exponential_air_mass_factor(
+        solar,
+        scale_height_km=scale_height_km,
+        max_altitude_km=max_altitude_km,
+        earth_radius_km=earth_radius_km,
+        num_samples=num_samples,
+        max_angle_deg=max_angle_deg,
+    )
+    viewing_factor = exponential_air_mass_factor(
+        viewing,
+        scale_height_km=scale_height_km,
+        max_altitude_km=max_altitude_km,
+        earth_radius_km=earth_radius_km,
+        num_samples=num_samples,
+        max_angle_deg=max_angle_deg,
+    )
+
+    if relative_azimuth_angle_deg is None:
+        weight = torch.ones_like(viewing_factor)
+    else:
+        if not isinstance(relative_azimuth_angle_deg, torch.Tensor):
+            relative = torch.tensor(
+                float(relative_azimuth_angle_deg),
+                dtype=torch.float32,
+                device=viewing_factor.device,
+            )
+        else:
+            relative = relative_azimuth_angle_deg.to(
+                device=viewing_factor.device, dtype=torch.float32
+            )
+        relative, _ = torch.broadcast_tensors(relative, viewing_factor)
+        relative = torch.clamp(relative, 0.0, 180.0)
+        weight = 0.5 * (1.0 + torch.cos(torch.deg2rad(relative)))
+    weight = weight.to(dtype=viewing_factor.dtype)
+    return solar_factor + weight * viewing_factor
+
+
+__all__ = [
+    "geometric_air_mass_factor",
+    "double_geometric_air_mass_factor",
+    "exponential_air_mass_factor",
+    "double_exponential_air_mass_factor",
+]
