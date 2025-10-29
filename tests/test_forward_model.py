@@ -133,3 +133,75 @@ def test_air_mass_factor_scales_optical_depth():
         diagnostics_scaled["optical_depth_component"]
         > diagnostics_base["optical_depth_component"]
     )
+
+
+def test_partial_instrument_parameter_overrides_only_apply_to_matching_ids():
+    wavelengths = np.linspace(430.0, 432.0, num=5, dtype=np.float32)
+    absorption = {"NO2": np.linspace(1.0, 2.0, num=5, dtype=np.float32) * 1e-20}
+    database = CrossSectionDatabase.from_arrays(wavelengths, absorption)
+    model = AutoDOASForwardModel(
+        torch.from_numpy(wavelengths),
+        database,
+        num_instruments=2,
+        embedding_dim=4,
+        kernel_size=3,
+    )
+    with torch.no_grad():
+        model.instrument_embedding.embedding.weight.zero_()
+        for module in model.nuisance_head:
+            if isinstance(module, torch.nn.Linear):
+                module.weight.zero_()
+                module.bias.zero_()
+    model.eval()
+
+    gas_columns = torch.full((2, len(model.gases)), 0.1)
+    nuisance = torch.zeros((2, len(model.gases)))
+    instrument_ids = torch.tensor([0, 1], dtype=torch.long)
+    overrides = {
+        1: InstrumentParameters(
+            wavelength_offset_nm=0.01,
+            wavelength_scale=1.001,
+            lsf_width_px=2.0,
+            stray_light_fraction=0.015,
+            nonlinear_response=0.01,
+        )
+    }
+
+    _, diagnostics = model(
+        gas_columns, instrument_ids, nuisance, instrument_parameters=overrides
+    )
+
+    torch.testing.assert_close(
+        diagnostics["instrument_stray_light"],
+        torch.tensor([0.0, 0.015], dtype=diagnostics["instrument_stray_light"].dtype),
+    )
+    torch.testing.assert_close(
+        diagnostics["applied_wavelength_offset"][0],
+        diagnostics["predicted_wavelength_offset"][0],
+    )
+    torch.testing.assert_close(
+        diagnostics["applied_wavelength_offset"][1],
+        torch.tensor(0.01, dtype=diagnostics["applied_wavelength_offset"].dtype),
+    )
+    torch.testing.assert_close(
+        diagnostics["applied_wavelength_scale"],
+        torch.tensor(
+            [
+                diagnostics["predicted_wavelength_scale"][0].item(),
+                1.001,
+            ],
+            dtype=diagnostics["applied_wavelength_scale"].dtype,
+        ),
+    )
+    torch.testing.assert_close(
+        diagnostics["applied_lsf_width"][0],
+        diagnostics["predicted_lsf_width"][0],
+    )
+    torch.testing.assert_close(
+        diagnostics["applied_lsf_width"][1],
+        torch.tensor(2.0, dtype=diagnostics["applied_lsf_width"].dtype),
+    )
+    torch.testing.assert_close(
+        diagnostics["instrument_nonlinearity"],
+        torch.tensor([0.0, 0.01], dtype=diagnostics["instrument_nonlinearity"].dtype),
+    )
