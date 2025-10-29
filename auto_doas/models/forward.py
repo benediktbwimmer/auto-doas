@@ -152,8 +152,14 @@ class AutoDOASForwardModel(nn.Module):
         wavelengths = base_wavelengths[None, :] * scales[:, None] + offsets[:, None]
 
         kernel = gaussian_kernel(lsf_width, self.kernel_size)
-        padded = F.pad(differential[:, None, :], (self.kernel_size // 2, self.kernel_size // 2), mode="replicate")
-        convolved = F.conv1d(padded, kernel[:, None, :], groups=batch_size)[:, 0, :]
+        padded = F.pad(
+            differential[:, None, :],
+            (self.kernel_size // 2, self.kernel_size // 2),
+            mode="replicate",
+        )
+        padded_group = padded.transpose(0, 1)
+        convolved = F.conv1d(padded_group, kernel[:, None, :], groups=batch_size)
+        convolved = convolved.transpose(0, 1)[:, 0, :]
         absorption_counts = torch.exp(-convolved)
         post_gain_counts = gain[:, None] * absorption_counts + offset[:, None]
         nonlinear_counts = post_gain_counts + instrument_nonlinear[:, None] * post_gain_counts**2
