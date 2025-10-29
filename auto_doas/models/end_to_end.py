@@ -49,6 +49,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
         instrument_ids: torch.Tensor,
         instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
         air_mass_factors: Optional[torch.Tensor] = None,
+        solar_zenith_angle: Optional[torch.Tensor] = None,
+        viewing_zenith_angle: Optional[torch.Tensor] = None,
+        relative_azimuth_angle: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Run encoder and forward model on Level-0 counts.
 
@@ -80,6 +83,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
             nuisance_latent,
             air_mass_factors=air_mass_factors,
             instrument_parameters=instrument_parameters,
+            solar_zenith_angle=solar_zenith_angle,
+            viewing_zenith_angle=viewing_zenith_angle,
+            relative_azimuth_angle=relative_azimuth_angle,
         )
 
         if self.detach_diagnostics:
@@ -104,6 +110,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
         nuisance_latent: torch.Tensor,
         instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
         air_mass_factors: Optional[torch.Tensor] = None,
+        solar_zenith_angle: Optional[torch.Tensor] = None,
+        viewing_zenith_angle: Optional[torch.Tensor] = None,
+        relative_azimuth_angle: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Synthesize Level-0 spectra using the physics forward model."""
 
@@ -113,6 +122,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
             nuisance_latent,
             air_mass_factors=air_mass_factors,
             instrument_parameters=instrument_parameters,
+            solar_zenith_angle=solar_zenith_angle,
+            viewing_zenith_angle=viewing_zenith_angle,
+            relative_azimuth_angle=relative_azimuth_angle,
         )
 
     def _infer_forward_nuisance_dim(self) -> int:

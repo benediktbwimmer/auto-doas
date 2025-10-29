@@ -11,6 +11,10 @@ import torch.nn.functional as F
 
 from ..physics.atmosphere import rayleigh_optical_depth
 from ..physics.cross_sections import CrossSectionDatabase
+from ..physics.geometry import (
+    double_geometric_air_mass_factor,
+    geometric_air_mass_factor,
+)
 
 
 def gaussian_kernel(width_px: torch.Tensor, kernel_size: int) -> torch.Tensor:
@@ -109,6 +113,9 @@ class AutoDOASForwardModel(nn.Module):
         nuisance_latent: torch.Tensor,
         air_mass_factors: Optional[torch.Tensor] = None,
         instrument_parameters: Optional[Dict[int, InstrumentParameters]] = None,
+        solar_zenith_angle: Optional[torch.Tensor] = None,
+        viewing_zenith_angle: Optional[torch.Tensor] = None,
+        relative_azimuth_angle: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Reconstruct spectra and return diagnostics."""
 
@@ -116,8 +123,48 @@ class AutoDOASForwardModel(nn.Module):
         device = gas_columns.device
         base_wavelengths = self.wavelengths_nm.to(device)
         absorption = self.absorption_matrix.to(device)
+        solar_amf_component: Optional[torch.Tensor] = None
+        viewing_amf_component: Optional[torch.Tensor] = None
+        viewing_weight: Optional[torch.Tensor] = None
         if air_mass_factors is None:
-            air_mass = torch.ones(batch_size, 1, device=device, dtype=gas_columns.dtype)
+            def _to_tensor(value: Optional[torch.Tensor | float | int]) -> Optional[torch.Tensor]:
+                if value is None:
+                    return None
+                if isinstance(value, torch.Tensor):
+                    return value.to(device=device, dtype=gas_columns.dtype)
+                return torch.tensor(value, device=device, dtype=gas_columns.dtype)
+
+            solar_angles = _to_tensor(solar_zenith_angle)
+            viewing_angles = _to_tensor(viewing_zenith_angle)
+            relative_angles = _to_tensor(relative_azimuth_angle)
+            if solar_angles is not None:
+                solar_amf_component = geometric_air_mass_factor(solar_angles).to(
+                    device=device, dtype=gas_columns.dtype
+                )
+            if viewing_angles is not None:
+                viewing_amf_component = geometric_air_mass_factor(viewing_angles).to(
+                    device=device, dtype=gas_columns.dtype
+                )
+            if solar_amf_component is not None and viewing_amf_component is not None:
+                if relative_angles is not None:
+                    clamped_relative = torch.clamp(relative_angles, 0.0, 180.0)
+                    viewing_weight = 0.5 * (
+                        1.0 + torch.cos(torch.deg2rad(clamped_relative))
+                    )
+                else:
+                    viewing_weight = torch.ones_like(viewing_amf_component)
+                viewing_weight = viewing_weight.to(dtype=gas_columns.dtype)
+                air_mass = double_geometric_air_mass_factor(
+                    solar_angles,
+                    viewing_angles,
+                    relative_angles,
+                ).to(device=device, dtype=gas_columns.dtype)
+            elif solar_amf_component is not None:
+                air_mass = solar_amf_component
+            elif viewing_amf_component is not None:
+                air_mass = viewing_amf_component
+            else:
+                air_mass = torch.ones(batch_size, device=device, dtype=gas_columns.dtype)
         else:
             air_mass = air_mass_factors.to(device=device, dtype=gas_columns.dtype)
             if air_mass.ndim == 1:
@@ -128,6 +175,8 @@ class AutoDOASForwardModel(nn.Module):
                 )
             elif air_mass.ndim > 2:
                 raise ValueError("air_mass_factors must be 1D or 2D tensor")
+        if air_mass.ndim == 1:
+            air_mass = air_mass[:, None]
         scaled_columns = gas_columns * air_mass
         optical_depth = torch.matmul(scaled_columns, absorption)
         continuum = torch.matmul(
@@ -240,6 +289,12 @@ class AutoDOASForwardModel(nn.Module):
             "air_mass_factor": air_mass.detach(),
             "effective_gas_columns": scaled_columns.detach(),
         }
+        if solar_amf_component is not None:
+            diagnostics["solar_air_mass_factor"] = solar_amf_component.detach()
+        if viewing_amf_component is not None:
+            diagnostics["viewing_air_mass_factor"] = viewing_amf_component.detach()
+        if viewing_weight is not None:
+            diagnostics["viewing_air_mass_weight"] = viewing_weight.detach()
         if rayleigh_component is not None:
             diagnostics["rayleigh_optical_depth"] = rayleigh_component.detach()
         return simulated, diagnostics
