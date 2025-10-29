@@ -48,6 +48,7 @@ class PhysicsInformedEndToEndModel(nn.Module):
         counts: torch.Tensor,
         instrument_ids: torch.Tensor,
         instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
+        air_mass_factors: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Run encoder and forward model on Level-0 counts.
 
@@ -58,6 +59,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
             instrument_parameters: Optional mapping that provides calibrated
                 instrument parameters.  When provided they override the learned
                 nuisance predictions in the forward model.
+            air_mass_factors: Optional tensor containing per-sample (or per-gas)
+                geometric air mass factors to scale the gas slant columns prior to
+                spectral synthesis.
 
         Returns:
             Tuple containing gas slant column estimates, nuisance latent vectors,
@@ -74,6 +78,7 @@ class PhysicsInformedEndToEndModel(nn.Module):
             gas_columns,
             instrument_ids,
             nuisance_latent,
+            air_mass_factors=air_mass_factors,
             instrument_parameters=instrument_parameters,
         )
 
@@ -98,6 +103,7 @@ class PhysicsInformedEndToEndModel(nn.Module):
         instrument_ids: torch.Tensor,
         nuisance_latent: torch.Tensor,
         instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
+        air_mass_factors: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Synthesize Level-0 spectra using the physics forward model."""
 
@@ -105,6 +111,7 @@ class PhysicsInformedEndToEndModel(nn.Module):
             gas_columns,
             instrument_ids,
             nuisance_latent,
+            air_mass_factors=air_mass_factors,
             instrument_parameters=instrument_parameters,
         )
 

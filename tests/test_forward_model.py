@@ -104,3 +104,32 @@ def test_instrument_nonlinearity_shapes_detector_response():
         diagnostics_nonlinear["pre_stray_counts"],
         diagnostics_base["pre_stray_counts"],
     )
+
+
+def test_air_mass_factor_scales_optical_depth():
+    model = _make_forward_model()
+    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+
+    with torch.no_grad():
+        model.absorption_matrix.copy_(model.absorption_matrix * 1e6)
+
+    _, diagnostics_base = model(gas_columns, instrument_ids, nuisance)
+    amf = torch.tensor([2.0])
+    scaled, diagnostics_scaled = model(
+        gas_columns,
+        instrument_ids,
+        nuisance,
+        air_mass_factors=amf,
+    )
+
+    torch.testing.assert_close(
+        diagnostics_scaled["air_mass_factor"], amf[:, None]
+    )
+    torch.testing.assert_close(
+        diagnostics_scaled["effective_gas_columns"],
+        gas_columns * amf[:, None],
+    )
+    assert torch.all(
+        diagnostics_scaled["optical_depth_component"]
+        > diagnostics_base["optical_depth_component"]
+    )

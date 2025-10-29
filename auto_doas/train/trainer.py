@@ -12,6 +12,7 @@ from ..config import HyperParameters
 from ..data.dataset import Level0Dataset
 from ..models.encoder import AutoDOASEncoder
 from ..models.forward import AutoDOASForwardModel, InstrumentParameters
+from ..physics.geometry import geometric_air_mass_factor
 from ..models.losses import AutoDOASLoss
 
 
@@ -62,15 +63,29 @@ class AutoDOASTrainer:
         for batch in dataloader:
             counts = batch["counts"].to(self.device)
             instrument_ids = batch["instrument_id"].to(self.device)
+            solar_zenith = batch.get("solar_zenith_angle")
+            air_mass_factors = None
+            if solar_zenith is not None:
+                air_mass_factors = geometric_air_mass_factor(
+                    solar_zenith.to(self.device)
+                )
             gas_columns, nuisance = self.encoder(counts)
             reconstruction, diagnostics = self.forward_model(
                 gas_columns,
                 instrument_ids,
                 nuisance,
+                air_mass_factors=air_mass_factors,
                 instrument_parameters=instrument_parameters,
             )
             neighbor_columns = gas_columns.roll(-1, dims=0)
-            inst_reg = torch.stack(list(diagnostics.values())[1:4], dim=0).mean(dim=0)
+            inst_reg = torch.stack(
+                [
+                    diagnostics["gain"],
+                    diagnostics["offset"],
+                    diagnostics["stray_light"],
+                ],
+                dim=0,
+            ).mean(dim=0)
             losses = self.loss_fn(
                 reconstruction,
                 counts,
