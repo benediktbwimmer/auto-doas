@@ -20,6 +20,8 @@ class Level0Spectrum:
     solar_zenith_angle: float
     exposure_time: float
     ccd_temperature: float
+    viewing_zenith_angle: Optional[float] = None
+    relative_azimuth_angle: Optional[float] = None
 
 
 class Level0Dataset(Dataset):
@@ -55,4 +57,18 @@ class Level0Dataset(Dataset):
             "solar_zenith_angle": sza,
             "exposure_time": exposure,
             "ccd_temperature": temperature,
+            **(
+                {"viewing_zenith_angle": torch.tensor(
+                    [item.viewing_zenith_angle for item in batch], dtype=torch.float32
+                )}
+                if all(item.viewing_zenith_angle is not None for item in batch)
+                else {}
+            ),
+            **(
+                {"relative_azimuth_angle": torch.tensor(
+                    [item.relative_azimuth_angle for item in batch], dtype=torch.float32
+                )}
+                if all(item.relative_azimuth_angle is not None for item in batch)
+                else {}
+            ),
         }

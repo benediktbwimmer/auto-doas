@@ -10,6 +10,10 @@ if str(ROOT) not in sys.path:
 
 from auto_doas.models.forward import AutoDOASForwardModel, InstrumentParameters
 from auto_doas.physics.cross_sections import CrossSectionDatabase
+from auto_doas.physics.geometry import (
+    double_geometric_air_mass_factor,
+    geometric_air_mass_factor,
+)
 
 
 def _make_forward_model(**kwargs) -> AutoDOASForwardModel:
@@ -124,6 +128,60 @@ def test_rayleigh_scattering_influences_reconstruction():
     assert torch.all(diagnostics_with["rayleigh_optical_depth"] > 0)
     assert "rayleigh_optical_depth" not in diagnostics_without
     assert not torch.allclose(reconstruction_with, reconstruction_without)
+
+
+def test_forward_model_derives_air_mass_from_geometry():
+    model = _make_forward_model()
+    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    solar = torch.tensor([60.0])
+    viewing = torch.tensor([30.0])
+
+    _, diagnostics = model(
+        gas_columns,
+        instrument_ids,
+        nuisance,
+        solar_zenith_angle=solar,
+        viewing_zenith_angle=viewing,
+    )
+
+    expected_total = double_geometric_air_mass_factor(solar, viewing)
+    expected_solar = geometric_air_mass_factor(solar)
+    expected_viewing = geometric_air_mass_factor(viewing)
+
+    torch.testing.assert_close(diagnostics["air_mass_factor"], expected_total[:, None])
+    torch.testing.assert_close(diagnostics["solar_air_mass_factor"], expected_solar)
+    torch.testing.assert_close(diagnostics["viewing_air_mass_factor"], expected_viewing)
+    torch.testing.assert_close(
+        diagnostics["viewing_air_mass_weight"], torch.ones_like(expected_viewing)
+    )
+
+
+def test_forward_model_uses_relative_azimuth_weighting():
+    model = _make_forward_model()
+    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    solar = torch.tensor([55.0])
+    viewing = torch.tensor([40.0])
+    relative = torch.tensor([180.0])
+
+    _, diagnostics = model(
+        gas_columns,
+        instrument_ids,
+        nuisance,
+        solar_zenith_angle=solar,
+        viewing_zenith_angle=viewing,
+        relative_azimuth_angle=relative,
+    )
+
+    expected_weight = 0.5 * (1.0 + torch.cos(torch.deg2rad(relative)))
+    expected_total = (
+        geometric_air_mass_factor(solar)
+        + expected_weight * geometric_air_mass_factor(viewing)
+    )
+
+    torch.testing.assert_close(
+        diagnostics["viewing_air_mass_weight"], expected_weight.to(diagnostics["viewing_air_mass_weight"].dtype)
+    )
+    torch.testing.assert_close(diagnostics["air_mass_factor"], expected_total[:, None])
 
 
 def test_air_mass_factor_scales_optical_depth():

@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 from .data.dataset import Level0Dataset
 from .models.encoder import AutoDOASEncoder
 from .models.forward import AutoDOASForwardModel, InstrumentParameters
-from .physics.geometry import geometric_air_mass_factor
 
 
 @dataclass
@@ -97,6 +96,8 @@ class PhysicsBasedDOASRetrieval:
         instrument_ids: torch.Tensor,
         nuisance_latent: Optional[torch.Tensor] = None,
         solar_zenith_angle: Optional[torch.Tensor] = None,
+        viewing_zenith_angle: Optional[torch.Tensor] = None,
+        relative_azimuth_angle: Optional[torch.Tensor] = None,
         air_mass_factors: Optional[torch.Tensor] = None,
         instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
         detach: bool = True,
@@ -112,10 +113,12 @@ class PhysicsBasedDOASRetrieval:
             nuisance_latent = nuisance_latent.to(self.device)
         if air_mass_factors is not None:
             air_mass_factors = air_mass_factors.to(self.device)
-        elif solar_zenith_angle is not None:
-            air_mass_factors = geometric_air_mass_factor(
-                solar_zenith_angle.to(self.device)
-            )
+        if solar_zenith_angle is not None:
+            solar_zenith_angle = solar_zenith_angle.to(self.device)
+        if viewing_zenith_angle is not None:
+            viewing_zenith_angle = viewing_zenith_angle.to(self.device)
+        if relative_azimuth_angle is not None:
+            relative_azimuth_angle = relative_azimuth_angle.to(self.device)
         instrument_parameters = self._resolve_instrument_parameters(instrument_parameters)
         reconstruction, diagnostics = self.forward_model(
             gas_columns,
@@ -123,6 +126,9 @@ class PhysicsBasedDOASRetrieval:
             nuisance_latent,
             air_mass_factors=air_mass_factors,
             instrument_parameters=instrument_parameters,
+            solar_zenith_angle=solar_zenith_angle,
+            viewing_zenith_angle=viewing_zenith_angle,
+            relative_azimuth_angle=relative_azimuth_angle,
         )
 
         if "air_mass_factor" in diagnostics:
@@ -164,10 +170,14 @@ class PhysicsBasedDOASRetrieval:
         counts = batch["counts"]
         instrument_ids = batch["instrument_id"]
         solar_zenith_angle = batch.get("solar_zenith_angle")
+        viewing_zenith_angle = batch.get("viewing_zenith_angle")
+        relative_azimuth_angle = batch.get("relative_azimuth_angle")
         return self.run(
             counts,
             instrument_ids,
             solar_zenith_angle=solar_zenith_angle,
+            viewing_zenith_angle=viewing_zenith_angle,
+            relative_azimuth_angle=relative_azimuth_angle,
             instrument_parameters=instrument_parameters,
         )
 

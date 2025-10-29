@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Optional, Union
 
 import torch
 
@@ -47,4 +47,51 @@ def geometric_air_mass_factor(
     return 1.0 / denominator
 
 
-__all__ = ["geometric_air_mass_factor"]
+def double_geometric_air_mass_factor(
+    solar_zenith_angle_deg: TensorLike,
+    viewing_zenith_angle_deg: TensorLike,
+    relative_azimuth_angle_deg: Optional[TensorLike] = None,
+    max_angle_deg: float = 89.0,
+) -> torch.Tensor:
+    """Two-leg geometric air mass factor for sun-to-surface and surface-to-sensor paths.
+
+    The function approximates the effective air mass factor for passive DOAS retrievals
+    where photons travel from the sun to the scattering point and then towards the
+    instrument.  Both the incoming solar zenith angle (SZA) and the viewing zenith
+    angle (VZA) are modeled using the same Kasten & Young (1989) formulation employed
+    by :func:`geometric_air_mass_factor`.  When a relative azimuth angle is supplied we
+    apply a cosine-based weight to the viewing path to mimic the reduced contribution
+    for back-scattered geometries.
+
+    Args:
+        solar_zenith_angle_deg: Solar zenith angle(s) in degrees.
+        viewing_zenith_angle_deg: Viewing zenith angle(s) in degrees.
+        relative_azimuth_angle_deg: Optional relative azimuth angle(s) in degrees.
+            ``0°`` corresponds to forward scattering whereas ``180°`` represents a
+            pure back-scattering configuration.  When omitted the viewing path is
+            fully counted.
+        max_angle_deg: Maximum zenith angle applied to both SZA and VZA.
+
+    Returns:
+        Torch tensor with the same broadcast shape as the input angles containing
+        the effective geometric air mass factor for a two-leg photon path.
+    """
+
+    solar = geometric_air_mass_factor(solar_zenith_angle_deg, max_angle_deg=max_angle_deg)
+    viewing = geometric_air_mass_factor(viewing_zenith_angle_deg, max_angle_deg=max_angle_deg)
+
+    if relative_azimuth_angle_deg is None:
+        weight = torch.ones_like(viewing)
+    else:
+        if not isinstance(relative_azimuth_angle_deg, torch.Tensor):
+            relative = torch.tensor(relative_azimuth_angle_deg, dtype=torch.float32, device=viewing.device)
+        else:
+            relative = relative_azimuth_angle_deg.to(device=viewing.device, dtype=torch.float32)
+        relative = torch.clamp(relative, 0.0, 180.0)
+        weight = 0.5 * (1.0 + torch.cos(torch.deg2rad(relative)))
+        weight = weight.to(dtype=viewing.dtype)
+
+    return solar + weight * viewing
+
+
+__all__ = ["geometric_air_mass_factor", "double_geometric_air_mass_factor"]

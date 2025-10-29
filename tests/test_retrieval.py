@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 
 from auto_doas.models.forward import AutoDOASForwardModel, InstrumentParameters
 from auto_doas.physics.cross_sections import CrossSectionDatabase
+from auto_doas.physics.geometry import double_geometric_air_mass_factor
 from auto_doas.retrieval import PhysicsBasedDOASRetrieval
 
 
@@ -126,6 +127,29 @@ def test_retrieval_computes_air_mass_from_solar_zenith_angle():
         torch.full_like(result.diagnostics["air_mass_factor"], expected),
         atol=2e-1,
         rtol=1e-1,
+    )
+
+
+def test_retrieval_combines_solar_and_viewing_geometry():
+    retrieval = _make_retrieval()
+    counts = torch.ones(1, 5)
+    instrument_ids = torch.tensor([0])
+    solar_zenith = torch.tensor([50.0])
+    viewing_zenith = torch.tensor([40.0])
+
+    result = retrieval.run(
+        counts,
+        instrument_ids,
+        solar_zenith_angle=solar_zenith,
+        viewing_zenith_angle=viewing_zenith,
+    )
+
+    expected = double_geometric_air_mass_factor(solar_zenith, viewing_zenith)
+    torch.testing.assert_close(
+        result.air_mass_factor[:, 0],
+        expected,
+        atol=5e-3,
+        rtol=1e-3,
     )
 
 

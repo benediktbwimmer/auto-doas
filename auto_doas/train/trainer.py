@@ -12,7 +12,6 @@ from ..config import HyperParameters
 from ..data.dataset import Level0Dataset
 from ..models.encoder import AutoDOASEncoder
 from ..models.forward import AutoDOASForwardModel, InstrumentParameters
-from ..physics.geometry import geometric_air_mass_factor
 from ..models.losses import AutoDOASLoss
 
 
@@ -64,18 +63,22 @@ class AutoDOASTrainer:
             counts = batch["counts"].to(self.device)
             instrument_ids = batch["instrument_id"].to(self.device)
             solar_zenith = batch.get("solar_zenith_angle")
-            air_mass_factors = None
-            if solar_zenith is not None:
-                air_mass_factors = geometric_air_mass_factor(
-                    solar_zenith.to(self.device)
-                )
+            viewing_zenith = batch.get("viewing_zenith_angle")
+            relative_azimuth = batch.get("relative_azimuth_angle")
+            solar_zenith = solar_zenith.to(self.device) if solar_zenith is not None else None
+            viewing_zenith = viewing_zenith.to(self.device) if viewing_zenith is not None else None
+            relative_azimuth = (
+                relative_azimuth.to(self.device) if relative_azimuth is not None else None
+            )
             gas_columns, nuisance = self.encoder(counts)
             reconstruction, diagnostics = self.forward_model(
                 gas_columns,
                 instrument_ids,
                 nuisance,
-                air_mass_factors=air_mass_factors,
                 instrument_parameters=instrument_parameters,
+                solar_zenith_angle=solar_zenith,
+                viewing_zenith_angle=viewing_zenith,
+                relative_azimuth_angle=relative_azimuth,
             )
             neighbor_columns = gas_columns.roll(-1, dims=0)
             inst_reg = torch.stack(
