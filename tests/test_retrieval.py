@@ -126,3 +126,19 @@ def test_retrieval_computes_air_mass_from_solar_zenith_angle():
         atol=2e-1,
         rtol=1e-1,
     )
+
+
+def test_vertical_columns_are_scaled_by_air_mass_factor():
+    retrieval = _make_retrieval()
+    counts = torch.ones(1, 5)
+    instrument_ids = torch.tensor([0])
+    air_mass = torch.tensor([2.5])
+
+    result = retrieval.run(counts, instrument_ids, air_mass_factors=air_mass)
+
+    torch.testing.assert_close(
+        result.air_mass_factor,
+        torch.full_like(result.air_mass_factor, 2.5),
+    )
+    expected_vertical = result.level2_columns / 2.5
+    torch.testing.assert_close(result.vertical_columns, expected_vertical)
