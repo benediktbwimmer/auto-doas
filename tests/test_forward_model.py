@@ -13,6 +13,7 @@ from auto_doas.physics.cross_sections import CrossSectionDatabase
 from auto_doas.physics.geometry import (
     double_geometric_air_mass_factor,
     geometric_air_mass_factor,
+    exponential_air_mass_factor,
 )
 
 
@@ -182,6 +183,55 @@ def test_forward_model_uses_relative_azimuth_weighting():
         diagnostics["viewing_air_mass_weight"], expected_weight.to(diagnostics["viewing_air_mass_weight"].dtype)
     )
     torch.testing.assert_close(diagnostics["air_mass_factor"], expected_total[:, None])
+
+
+def test_forward_model_supports_chapman_air_mass_mode():
+    model = _make_forward_model(
+        air_mass_mode="chapman",
+        air_mass_scale_height_km=7.0,
+        air_mass_max_altitude_km=60.0,
+        air_mass_num_samples=384,
+    )
+    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    solar = torch.tensor([70.0])
+    viewing = torch.tensor([25.0])
+    relative = torch.tensor([120.0])
+
+    _, diagnostics = model(
+        gas_columns,
+        instrument_ids,
+        nuisance,
+        solar_zenith_angle=solar,
+        viewing_zenith_angle=viewing,
+        relative_azimuth_angle=relative,
+    )
+
+    expected_solar = exponential_air_mass_factor(
+        solar,
+        scale_height_km=model.air_mass_scale_height_km,
+        max_altitude_km=model.air_mass_max_altitude_km,
+        earth_radius_km=model.air_mass_earth_radius_km,
+        num_samples=model.air_mass_num_samples,
+        max_angle_deg=model.air_mass_max_angle_deg,
+    )
+    expected_viewing = exponential_air_mass_factor(
+        viewing,
+        scale_height_km=model.air_mass_scale_height_km,
+        max_altitude_km=model.air_mass_max_altitude_km,
+        earth_radius_km=model.air_mass_earth_radius_km,
+        num_samples=model.air_mass_num_samples,
+        max_angle_deg=model.air_mass_max_angle_deg,
+    )
+    expected_weight = 0.5 * (1.0 + torch.cos(torch.deg2rad(relative)))
+    expected_total = expected_solar + expected_weight * expected_viewing
+
+    torch.testing.assert_close(diagnostics["air_mass_factor"], expected_total[:, None])
+    torch.testing.assert_close(diagnostics["solar_air_mass_factor"], expected_solar)
+    torch.testing.assert_close(diagnostics["viewing_air_mass_factor"], expected_viewing)
+    torch.testing.assert_close(
+        diagnostics["viewing_air_mass_weight"],
+        expected_weight.to(diagnostics["viewing_air_mass_weight"].dtype),
+    )
 
 
 def test_air_mass_factor_scales_optical_depth():
