@@ -39,7 +39,8 @@ class PhysicsBasedDOASRetrieval:
     The retrieval follows the flow: Level-0 detector counts are ingested by the encoder,
     producing gas slant column estimates (Level-2) and nuisance parameters.  These are then
     passed through the differentiable forward model to synthesize Level-0 spectra, closing the
-    loop between measurement and reconstruction.
+    loop between measurement and reconstruction.  Instrument calibration parameters can be
+    registered with the retriever and are automatically merged with per-call overrides.
     """
 
     def __init__(
@@ -47,12 +48,16 @@ class PhysicsBasedDOASRetrieval:
         encoder: AutoDOASEncoder,
         forward_model: AutoDOASForwardModel,
         device: Optional[torch.device] = None,
+        default_instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
     ) -> None:
         self.encoder = encoder
         self.forward_model = forward_model
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
+        self._instrument_parameters: Dict[int, InstrumentParameters] = {}
+        if default_instrument_parameters is not None:
+            self.set_instrument_parameters(default_instrument_parameters)
         self.to(self.device)
         self.eval()
 
@@ -87,6 +92,7 @@ class PhysicsBasedDOASRetrieval:
         else:
             gas_columns, _ = self.encoder(counts)
             nuisance_latent = nuisance_latent.to(self.device)
+        instrument_parameters = self._resolve_instrument_parameters(instrument_parameters)
         reconstruction, diagnostics = self.forward_model(
             gas_columns,
             instrument_ids,
@@ -115,6 +121,43 @@ class PhysicsBasedDOASRetrieval:
             instrument_ids,
             instrument_parameters=instrument_parameters,
         )
+
+    def set_instrument_parameters(
+        self, instrument_parameters: Mapping[int, InstrumentParameters]
+    ) -> "PhysicsBasedDOASRetrieval":
+        """Replace the default instrument parameters used during retrieval."""
+
+        self._instrument_parameters = {
+            int(idx): params for idx, params in instrument_parameters.items()
+        }
+        return self
+
+    def update_instrument_parameters(
+        self, instrument_parameters: Mapping[int, InstrumentParameters]
+    ) -> "PhysicsBasedDOASRetrieval":
+        """Update (or add) instrument parameters used during retrieval."""
+
+        for idx, params in instrument_parameters.items():
+            self._instrument_parameters[int(idx)] = params
+        return self
+
+    def clear_instrument_parameters(self) -> "PhysicsBasedDOASRetrieval":
+        """Remove all stored default instrument parameters."""
+
+        self._instrument_parameters.clear()
+        return self
+
+    def _resolve_instrument_parameters(
+        self, overrides: Optional[Mapping[int, InstrumentParameters]]
+    ) -> Optional[Dict[int, InstrumentParameters]]:
+        """Merge stored instrument parameters with overrides for a retrieval call."""
+
+        if overrides is None and not self._instrument_parameters:
+            return None
+        merged: Dict[int, InstrumentParameters] = dict(self._instrument_parameters)
+        if overrides is not None:
+            merged.update({int(idx): params for idx, params in overrides.items()})
+        return merged
 
     @torch.no_grad()
     def retrieve_dataset(
