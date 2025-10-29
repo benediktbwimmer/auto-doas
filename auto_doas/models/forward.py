@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..physics.atmosphere import rayleigh_optical_depth
 from ..physics.cross_sections import CrossSectionDatabase
 
 
@@ -67,6 +68,9 @@ class AutoDOASForwardModel(nn.Module):
         num_instruments: int = 1,
         embedding_dim: int = 128,
         kernel_size: int = 15,
+        include_rayleigh: bool = True,
+        rayleigh_pressure_hpa: float = 1013.25,
+        rayleigh_temperature_k: float = 288.15,
     ) -> None:
         super().__init__()
         self.register_buffer("wavelengths_nm", wavelengths_nm.float())
@@ -88,6 +92,15 @@ class AutoDOASForwardModel(nn.Module):
             nn.GELU(),
             nn.Linear(64, 7),
         )
+        rayleigh = rayleigh_optical_depth(
+            self.wavelengths_nm,
+            pressure_hpa=rayleigh_pressure_hpa,
+            temperature_k=rayleigh_temperature_k,
+        )
+        if not include_rayleigh:
+            rayleigh = torch.zeros_like(rayleigh)
+        self.register_buffer("rayleigh_optical_depth", rayleigh.float())
+        self.include_rayleigh = include_rayleigh
 
     def forward(
         self,
@@ -122,6 +135,19 @@ class AutoDOASForwardModel(nn.Module):
             self.continuum_basis[: gas_columns.shape[1] + 1].to(device),
         )
         differential = optical_depth + continuum
+
+        rayleigh_component = None
+        if self.include_rayleigh:
+            if air_mass.ndim == 1:
+                rayleigh_amf = air_mass[:, None]
+            elif air_mass.ndim == 2:
+                rayleigh_amf = air_mass.mean(dim=1, keepdim=True)
+            else:
+                raise ValueError("air_mass_factors must be 1D or 2D tensor")
+            rayleigh_component = rayleigh_amf * self.rayleigh_optical_depth.to(
+                device=device, dtype=gas_columns.dtype
+            )[None, :]
+            differential = differential + rayleigh_component
 
         instrument_embed = self.instrument_embedding(instrument_ids)
         nuisance_input = torch.cat([nuisance_latent, instrument_embed], dim=-1)
@@ -214,6 +240,8 @@ class AutoDOASForwardModel(nn.Module):
             "air_mass_factor": air_mass.detach(),
             "effective_gas_columns": scaled_columns.detach(),
         }
+        if rayleigh_component is not None:
+            diagnostics["rayleigh_optical_depth"] = rayleigh_component.detach()
         return simulated, diagnostics
 
     def _resample_spectrum(

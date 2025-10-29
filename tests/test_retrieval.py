@@ -26,7 +26,7 @@ class DummyEncoder(torch.nn.Module):
         return gas, nuisance
 
 
-def _make_forward_model(num_instruments: int = 2) -> AutoDOASForwardModel:
+def _make_forward_model(num_instruments: int = 2, **kwargs) -> AutoDOASForwardModel:
     wavelengths = np.linspace(430.0, 432.0, num=5, dtype=np.float32)
     absorption = {"NO2": np.linspace(1.0, 2.0, num=5, dtype=np.float32) * 1e-20}
     database = CrossSectionDatabase.from_arrays(wavelengths, absorption)
@@ -36,6 +36,7 @@ def _make_forward_model(num_instruments: int = 2) -> AutoDOASForwardModel:
         num_instruments=num_instruments,
         embedding_dim=4,
         kernel_size=3,
+        **kwargs,
     )
     with torch.no_grad():
         model.instrument_embedding.embedding.weight.zero_()

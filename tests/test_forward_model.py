@@ -12,7 +12,7 @@ from auto_doas.models.forward import AutoDOASForwardModel, InstrumentParameters
 from auto_doas.physics.cross_sections import CrossSectionDatabase
 
 
-def _make_forward_model() -> AutoDOASForwardModel:
+def _make_forward_model(**kwargs) -> AutoDOASForwardModel:
     wavelengths = np.linspace(430.0, 432.0, num=5, dtype=np.float32)
     absorption = {"NO2": np.linspace(1.0, 2.0, num=5, dtype=np.float32) * 1e-20}
     database = CrossSectionDatabase.from_arrays(wavelengths, absorption)
@@ -22,6 +22,7 @@ def _make_forward_model() -> AutoDOASForwardModel:
         num_instruments=1,
         embedding_dim=4,
         kernel_size=3,
+        **kwargs,
     )
     with torch.no_grad():
         model.instrument_embedding.embedding.weight.zero_()
@@ -104,6 +105,25 @@ def test_instrument_nonlinearity_shapes_detector_response():
         diagnostics_nonlinear["pre_stray_counts"],
         diagnostics_base["pre_stray_counts"],
     )
+
+
+def test_rayleigh_scattering_influences_reconstruction():
+    model_with = _make_forward_model(include_rayleigh=True)
+    model_without = _make_forward_model(include_rayleigh=False)
+
+    gas_columns, instrument_ids, nuisance = _dummy_inputs(model_with)
+
+    reconstruction_with, diagnostics_with = model_with(
+        gas_columns, instrument_ids, nuisance
+    )
+    reconstruction_without, diagnostics_without = model_without(
+        gas_columns, instrument_ids, nuisance
+    )
+
+    assert "rayleigh_optical_depth" in diagnostics_with
+    assert torch.all(diagnostics_with["rayleigh_optical_depth"] > 0)
+    assert "rayleigh_optical_depth" not in diagnostics_without
+    assert not torch.allclose(reconstruction_with, reconstruction_without)
 
 
 def test_air_mass_factor_scales_optical_depth():

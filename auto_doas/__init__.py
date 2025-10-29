@@ -5,6 +5,7 @@ Provides components for building an unsupervised Differential Optical Absorption
 """
 
 from .config import DEFAULT_HYPERPARAMS
+from .physics.atmosphere import rayleigh_optical_depth
 from .physics.cross_sections import CrossSectionDatabase
 from .physics.geometry import geometric_air_mass_factor
 from .models.forward import AutoDOASForwardModel, InstrumentParameters
@@ -17,6 +18,7 @@ __all__ = [
     "DEFAULT_HYPERPARAMS",
     "CrossSectionDatabase",
     "geometric_air_mass_factor",
+    "rayleigh_optical_depth",
     "AutoDOASForwardModel",
     "InstrumentParameters",
     "AutoDOASEncoder",
