@@ -8,6 +8,7 @@ from .config import DEFAULT_HYPERPARAMS
 from .physics.cross_sections import CrossSectionDatabase
 from .models.forward import AutoDOASForwardModel, InstrumentParameters
 from .models.encoder import AutoDOASEncoder
+from .models.end_to_end import PhysicsInformedEndToEndModel
 from .retrieval import PhysicsBasedDOASRetrieval, RetrievalResult
 from .train.trainer import AutoDOASTrainer
 
@@ -17,6 +18,7 @@ __all__ = [
     "AutoDOASForwardModel",
     "InstrumentParameters",
     "AutoDOASEncoder",
+    "PhysicsInformedEndToEndModel",
     "PhysicsBasedDOASRetrieval",
     "RetrievalResult",
     "AutoDOASTrainer",
