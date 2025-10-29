@@ -16,21 +16,36 @@ from .physics.geometry import geometric_air_mass_factor
 
 @dataclass
 class RetrievalResult:
-    """Container with Level-2 products and Level-0 reconstructions."""
+    """Container with Level-2 products and Level-0 reconstructions.
+
+    Attributes:
+        level2_columns: Retrieved slant column densities for each gas.
+        vertical_columns: Vertical column densities obtained by dividing the
+            slant columns by the corresponding air mass factors.
+        nuisance_latent: Latent nuisance parameters produced by the encoder.
+        reconstruction: Forward model reconstruction of the Level-0 counts.
+        diagnostics: Additional tensors emitted by the forward model.
+        air_mass_factor: Air mass factors used to convert slant to vertical
+            columns. The shape matches ``[batch, 1]`` for broadcasting.
+    """
 
     level2_columns: torch.Tensor
+    vertical_columns: torch.Tensor
     nuisance_latent: torch.Tensor
     reconstruction: torch.Tensor
     diagnostics: Dict[str, torch.Tensor]
+    air_mass_factor: torch.Tensor
 
     def to(self, device: torch.device) -> "RetrievalResult":
         """Move the tensors inside the result to ``device``."""
 
         return RetrievalResult(
             level2_columns=self.level2_columns.to(device),
+            vertical_columns=self.vertical_columns.to(device),
             nuisance_latent=self.nuisance_latent.to(device),
             reconstruction=self.reconstruction.to(device),
             diagnostics={key: value.to(device) for key, value in self.diagnostics.items()},
+            air_mass_factor=self.air_mass_factor.to(device),
         )
 
 
@@ -109,12 +124,34 @@ class PhysicsBasedDOASRetrieval:
             air_mass_factors=air_mass_factors,
             instrument_parameters=instrument_parameters,
         )
+
+        if "air_mass_factor" in diagnostics:
+            air_mass_factor = diagnostics["air_mass_factor"]
+        else:
+            air_mass_factor = torch.ones(
+                gas_columns.shape[0],
+                1,
+                device=self.device,
+                dtype=gas_columns.dtype,
+            )
+        if air_mass_factor.ndim == 1:
+            air_mass_factor = air_mass_factor[:, None]
+        vertical_columns = gas_columns / torch.clamp(air_mass_factor, min=1e-6)
         if detach:
             gas_columns = gas_columns.detach()
             nuisance_latent = nuisance_latent.detach()
             reconstruction = reconstruction.detach()
             diagnostics = {key: value.detach() for key, value in diagnostics.items()}
-        return RetrievalResult(gas_columns, nuisance_latent, reconstruction, diagnostics)
+            air_mass_factor = air_mass_factor.detach()
+            vertical_columns = vertical_columns.detach()
+        return RetrievalResult(
+            gas_columns,
+            vertical_columns,
+            nuisance_latent,
+            reconstruction,
+            diagnostics,
+            air_mass_factor,
+        )
 
     @torch.no_grad()
     def retrieve_batch(
