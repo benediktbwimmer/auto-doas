@@ -110,3 +110,19 @@ def test_update_instrument_parameters_merges_defaults():
         result_new.diagnostics["instrument_stray_light"],
         torch.full_like(result_new.diagnostics["instrument_stray_light"], 0.04),
     )
+
+
+def test_retrieval_computes_air_mass_from_solar_zenith_angle():
+    retrieval = _make_retrieval()
+    counts = torch.ones(1, 5)
+    instrument_ids = torch.tensor([0])
+    solar_zenith = torch.tensor([60.0])
+
+    result = retrieval.run(counts, instrument_ids, solar_zenith_angle=solar_zenith)
+    expected = 2.0  # approximately 1 / cos(60 deg)
+    torch.testing.assert_close(
+        result.diagnostics["air_mass_factor"],
+        torch.full_like(result.diagnostics["air_mass_factor"], expected),
+        atol=2e-1,
+        rtol=1e-1,
+    )

@@ -94,6 +94,7 @@ class AutoDOASForwardModel(nn.Module):
         gas_columns: torch.Tensor,
         instrument_ids: torch.Tensor,
         nuisance_latent: torch.Tensor,
+        air_mass_factors: Optional[torch.Tensor] = None,
         instrument_parameters: Optional[Dict[int, InstrumentParameters]] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Reconstruct spectra and return diagnostics."""
@@ -102,7 +103,20 @@ class AutoDOASForwardModel(nn.Module):
         device = gas_columns.device
         base_wavelengths = self.wavelengths_nm.to(device)
         absorption = self.absorption_matrix.to(device)
-        optical_depth = torch.matmul(gas_columns, absorption)
+        if air_mass_factors is None:
+            air_mass = torch.ones(batch_size, 1, device=device, dtype=gas_columns.dtype)
+        else:
+            air_mass = air_mass_factors.to(device=device, dtype=gas_columns.dtype)
+            if air_mass.ndim == 1:
+                air_mass = air_mass[:, None]
+            elif air_mass.ndim == 2 and air_mass.shape != gas_columns.shape:
+                raise ValueError(
+                    "air_mass_factors must have shape [batch] or match gas_columns"
+                )
+            elif air_mass.ndim > 2:
+                raise ValueError("air_mass_factors must be 1D or 2D tensor")
+        scaled_columns = gas_columns * air_mass
+        optical_depth = torch.matmul(scaled_columns, absorption)
         continuum = torch.matmul(
             torch.cat([gas_columns, torch.ones(batch_size, 1, device=device)], dim=1),
             self.continuum_basis[: gas_columns.shape[1] + 1].to(device),
@@ -176,6 +190,7 @@ class AutoDOASForwardModel(nn.Module):
         total_stray = torch.clamp(predicted_stray + instrument_stray, 0.0, 0.2)
         simulated = (1 - total_stray[:, None]) * nonlinear_counts + total_stray[:, None] * nonlinear_counts.mean(dim=1, keepdim=True)
         diagnostics = {
+            "optical_depth_component": optical_depth.detach(),
             "optical_depth": differential.detach(),
             "gain": gain.detach(),
             "offset": offset.detach(),
@@ -194,6 +209,8 @@ class AutoDOASForwardModel(nn.Module):
             "total_nonlinearity": total_nonlinear.detach(),
             "post_gain_counts": post_gain_counts.detach(),
             "pre_stray_counts": nonlinear_counts.detach(),
+            "air_mass_factor": air_mass.detach(),
+            "effective_gas_columns": scaled_columns.detach(),
         }
         return simulated, diagnostics
 
