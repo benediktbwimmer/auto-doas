@@ -15,6 +15,7 @@ from ..physics.geometry import (
     geometric_air_mass_factor,
     exponential_air_mass_factor,
 )
+from .context import ObservationContextConfig, ObservationContextEncoder
 
 
 def gaussian_kernel(width_px: torch.Tensor, kernel_size: int) -> torch.Tensor:
@@ -50,17 +51,6 @@ class InstrumentParameters:
         )
 
 
-class InstrumentEmbedding(nn.Module):
-    """Embedding table storing instrument specific parameters."""
-
-    def __init__(self, num_instruments: int, embedding_dim: int):
-        super().__init__()
-        self.embedding = nn.Embedding(num_instruments, embedding_dim)
-
-    def forward(self, instrument_ids: torch.Tensor) -> torch.Tensor:
-        return self.embedding(instrument_ids)
-
-
 class AutoDOASForwardModel(nn.Module):
     """Combine atmospheric latents and instrument parameters to reconstruct spectra."""
 
@@ -71,6 +61,10 @@ class AutoDOASForwardModel(nn.Module):
         continuum_basis: Optional[torch.Tensor] = None,
         num_instruments: int = 1,
         embedding_dim: int = 128,
+        context_time_fourier_terms: int = 4,
+        context_angle_fourier_terms: int = 3,
+        context_metadata_scaler: float = 0.1,
+        context_day_period_seconds: float = 86_400.0,
         kernel_size: int = 15,
         include_rayleigh: bool = True,
         rayleigh_pressure_hpa: float = 1013.25,
@@ -95,10 +89,18 @@ class AutoDOASForwardModel(nn.Module):
                 dim=0,
             )
         self.register_buffer("continuum_basis", continuum_basis)
-        self.instrument_embedding = InstrumentEmbedding(num_instruments, embedding_dim)
+        self.num_instruments = int(num_instruments)
+        context_config = ObservationContextConfig(
+            embedding_dim=embedding_dim,
+            time_fourier_terms=context_time_fourier_terms,
+            angle_fourier_terms=context_angle_fourier_terms,
+            metadata_scaler=context_metadata_scaler,
+            day_period_seconds=context_day_period_seconds,
+        )
+        self.context_encoder = ObservationContextEncoder(context_config)
         self.kernel_size = kernel_size
         self.nuisance_head = nn.Sequential(
-            nn.Linear(embedding_dim + len(self.gases), 64),
+            nn.LazyLinear(64),
             nn.GELU(),
             nn.Linear(64, 7),
         )
@@ -132,34 +134,44 @@ class AutoDOASForwardModel(nn.Module):
         solar_zenith_angle: Optional[torch.Tensor] = None,
         viewing_zenith_angle: Optional[torch.Tensor] = None,
         relative_azimuth_angle: Optional[torch.Tensor] = None,
+        timestamps: Optional[torch.Tensor] = None,
+        exposure_time: Optional[torch.Tensor] = None,
+        ccd_temperature: Optional[torch.Tensor] = None,
+        solar_reference: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Reconstruct spectra and return diagnostics."""
 
         batch_size = gas_columns.shape[0]
         device = gas_columns.device
+        dtype = gas_columns.dtype
         base_wavelengths = self.wavelengths_nm.to(device)
         absorption = self.absorption_matrix.to(device)
         solar_amf_component: Optional[torch.Tensor] = None
         viewing_amf_component: Optional[torch.Tensor] = None
         viewing_weight: Optional[torch.Tensor] = None
+        air_mass: Optional[torch.Tensor] = None
+
+        def _to_tensor(value: Optional[torch.Tensor | float | int]) -> Optional[torch.Tensor]:
+            if value is None:
+                return None
+            if isinstance(value, torch.Tensor):
+                return value.to(device=device, dtype=dtype)
+            return torch.tensor(value, device=device, dtype=dtype)
+
+        def _prepare(value: Optional[torch.Tensor | float | int]) -> Optional[torch.Tensor]:
+            tensor = _to_tensor(value)
+            if tensor is not None and tensor.ndim == 0:
+                tensor = tensor.expand(batch_size)
+            return tensor
+
+        solar_angles = _prepare(solar_zenith_angle)
+        viewing_angles = _prepare(viewing_zenith_angle)
+        relative_angles = _prepare(relative_azimuth_angle)
+        timestamp_values = _prepare(timestamps)
+        exposure_values = _prepare(exposure_time)
+        temperature_values = _prepare(ccd_temperature)
+
         if air_mass_factors is None:
-            def _to_tensor(value: Optional[torch.Tensor | float | int]) -> Optional[torch.Tensor]:
-                if value is None:
-                    return None
-                if isinstance(value, torch.Tensor):
-                    return value.to(device=device, dtype=gas_columns.dtype)
-                return torch.tensor(value, device=device, dtype=gas_columns.dtype)
-
-            def _prepare(value: Optional[torch.Tensor | float | int]) -> Optional[torch.Tensor]:
-                tensor = _to_tensor(value)
-                if tensor is not None and tensor.ndim == 0:
-                    tensor = tensor.expand(batch_size)
-                return tensor
-
-            solar_angles = _prepare(solar_zenith_angle)
-            viewing_angles = _prepare(viewing_zenith_angle)
-            relative_angles = _prepare(relative_azimuth_angle)
-
             def _compute_component(angle_tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
                 if angle_tensor is None:
                     return None
@@ -176,7 +188,7 @@ class AutoDOASForwardModel(nn.Module):
                     component = geometric_air_mass_factor(
                         angle_tensor, max_angle_deg=self.air_mass_max_angle_deg
                     )
-                return component.to(device=device, dtype=gas_columns.dtype)
+                return component.to(device=device, dtype=dtype)
 
             if solar_angles is not None:
                 solar_amf_component = _compute_component(solar_angles)
@@ -186,26 +198,24 @@ class AutoDOASForwardModel(nn.Module):
                 viewing_amf_component = viewing_amf_component.reshape(batch_size, -1)[:, 0]
             if solar_amf_component is not None and viewing_amf_component is not None:
                 if relative_angles is not None:
-                    relative = relative_angles.to(device=device, dtype=gas_columns.dtype)
-                    relative = relative.reshape(batch_size, -1)[:, 0]
-                    relative = torch.clamp(relative, 0.0, 180.0)
+                    relative = torch.clamp(relative_angles.reshape(batch_size, -1)[:, 0], 0.0, 180.0)
                     viewing_weight = 0.5 * (
                         1.0 + torch.cos(torch.deg2rad(relative))
                     )
                 else:
                     viewing_weight = torch.ones(
-                        batch_size, device=device, dtype=gas_columns.dtype
+                        batch_size, device=device, dtype=dtype
                     )
-                viewing_weight = viewing_weight.to(dtype=gas_columns.dtype)
+                viewing_weight = viewing_weight.to(dtype=dtype)
                 air_mass = solar_amf_component + viewing_weight * viewing_amf_component
             elif solar_amf_component is not None:
                 air_mass = solar_amf_component
             elif viewing_amf_component is not None:
                 air_mass = viewing_amf_component
             else:
-                air_mass = torch.ones(batch_size, device=device, dtype=gas_columns.dtype)
+                air_mass = torch.ones(batch_size, device=device, dtype=dtype)
         else:
-            air_mass = air_mass_factors.to(device=device, dtype=gas_columns.dtype)
+            air_mass = air_mass_factors.to(device=device, dtype=dtype)
             if air_mass.ndim == 1:
                 air_mass = air_mass[:, None]
             elif air_mass.ndim == 2 and air_mass.shape != gas_columns.shape:
@@ -223,6 +233,14 @@ class AutoDOASForwardModel(nn.Module):
             self.continuum_basis[: gas_columns.shape[1] + 1].to(device),
         )
         differential = optical_depth + continuum
+        solar_reference_component = None
+        if solar_reference is not None:
+            solar_reference_component = solar_reference.to(device=device, dtype=dtype)
+            if solar_reference_component.ndim == 1:
+                solar_reference_component = solar_reference_component[None, :]
+            if solar_reference_component.shape[0] == 1:
+                solar_reference_component = solar_reference_component.expand(batch_size, -1)
+            differential = differential + solar_reference_component
 
         rayleigh_component = None
         if self.include_rayleigh:
@@ -237,8 +255,16 @@ class AutoDOASForwardModel(nn.Module):
             )[None, :]
             differential = differential + rayleigh_component
 
-        instrument_embed = self.instrument_embedding(instrument_ids)
-        nuisance_input = torch.cat([nuisance_latent, instrument_embed], dim=-1)
+        context_embedding = self.context_encoder(
+            batch_size=batch_size,
+            timestamps=timestamp_values,
+            solar_zenith_angle=solar_angles,
+            viewing_zenith_angle=viewing_angles,
+            relative_azimuth_angle=relative_angles,
+            exposure_time=exposure_values,
+            ccd_temperature=temperature_values,
+        ).to(device=device, dtype=dtype)
+        nuisance_input = torch.cat([nuisance_latent, context_embedding], dim=-1)
         nuisance_params = self.nuisance_head(nuisance_input)
         gain = F.softplus(nuisance_params[:, 0]) + 1e-3
         offset = nuisance_params[:, 1]
@@ -308,6 +334,7 @@ class AutoDOASForwardModel(nn.Module):
         diagnostics = {
             "optical_depth_component": optical_depth.detach(),
             "optical_depth": differential.detach(),
+            "context_embedding": context_embedding.detach(),
             "gain": gain.detach(),
             "offset": offset.detach(),
             "stray_light": total_stray.detach(),
@@ -336,6 +363,8 @@ class AutoDOASForwardModel(nn.Module):
             diagnostics["viewing_air_mass_weight"] = viewing_weight.detach()
         if rayleigh_component is not None:
             diagnostics["rayleigh_optical_depth"] = rayleigh_component.detach()
+        if solar_reference_component is not None:
+            diagnostics["solar_reference_log"] = solar_reference_component.detach()
         return simulated, diagnostics
 
     def _resample_spectrum(
