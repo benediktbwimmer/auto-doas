@@ -52,6 +52,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
         solar_zenith_angle: Optional[torch.Tensor] = None,
         viewing_zenith_angle: Optional[torch.Tensor] = None,
         relative_azimuth_angle: Optional[torch.Tensor] = None,
+        timestamps: Optional[torch.Tensor] = None,
+        exposure_time: Optional[torch.Tensor] = None,
+        ccd_temperature: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Run encoder and forward model on Level-0 counts.
 
@@ -86,6 +89,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
             solar_zenith_angle=solar_zenith_angle,
             viewing_zenith_angle=viewing_zenith_angle,
             relative_azimuth_angle=relative_azimuth_angle,
+            timestamps=timestamps,
+            exposure_time=exposure_time,
+            ccd_temperature=ccd_temperature,
         )
 
         if self.detach_diagnostics:
@@ -113,6 +119,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
         solar_zenith_angle: Optional[torch.Tensor] = None,
         viewing_zenith_angle: Optional[torch.Tensor] = None,
         relative_azimuth_angle: Optional[torch.Tensor] = None,
+        timestamps: Optional[torch.Tensor] = None,
+        exposure_time: Optional[torch.Tensor] = None,
+        ccd_temperature: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Synthesize Level-0 spectra using the physics forward model."""
 
@@ -125,6 +134,9 @@ class PhysicsInformedEndToEndModel(nn.Module):
             solar_zenith_angle=solar_zenith_angle,
             viewing_zenith_angle=viewing_zenith_angle,
             relative_azimuth_angle=relative_azimuth_angle,
+            timestamps=timestamps,
+            exposure_time=exposure_time,
+            ccd_temperature=ccd_temperature,
         )
 
     def _infer_forward_nuisance_dim(self) -> int:
@@ -153,4 +165,3 @@ class PhysicsInformedEndToEndModel(nn.Module):
 
 
 __all__ = ["PhysicsInformedEndToEndModel"]
-

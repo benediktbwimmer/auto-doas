@@ -25,6 +25,10 @@ class HyperParameters:
     lambda_cons: float = 0.2
     lambda_theta: float = 0.05
     lambda_nn: float = 0.01
+    lambda_mean: float = 0.0
+    mean_target: float = 0.0
+    calibration_prior_scale: float = 0.0
+    calibration_prior_bias: float = 0.0
 
     def to_dict(self) -> Dict[str, float]:
         """Return a plain dictionary representation."""
@@ -41,6 +45,10 @@ class HyperParameters:
             "lambda_cons": self.lambda_cons,
             "lambda_theta": self.lambda_theta,
             "lambda_nn": self.lambda_nn,
+            "lambda_mean": self.lambda_mean,
+            "mean_target": self.mean_target,
+            "calibration_prior_scale": self.calibration_prior_scale,
+            "calibration_prior_bias": self.calibration_prior_bias,
         }
 
 

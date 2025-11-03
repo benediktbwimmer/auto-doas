@@ -29,29 +29,37 @@ def _make_forward_model(**kwargs) -> AutoDOASForwardModel:
         kernel_size=3,
         **kwargs,
     )
+    model.eval()
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
     with torch.no_grad():
-        model.instrument_embedding.embedding.weight.zero_()
+        model(gas_columns, instrument_ids, nuisance, **context)
         for module in model.nuisance_head:
             if isinstance(module, torch.nn.Linear):
                 module.weight.zero_()
                 module.bias.zero_()
-    model.eval()
     return model
 
 
-def _dummy_inputs(model: AutoDOASForwardModel):
-    batch_size = 1
+def _dummy_inputs(model: AutoDOASForwardModel, batch_size: int = 1):
     gas_columns = torch.full((batch_size, len(model.gases)), 0.1)
     nuisance = torch.zeros((batch_size, len(model.gases)))
     instrument_ids = torch.zeros(batch_size, dtype=torch.long)
-    return gas_columns, instrument_ids, nuisance
+    context = {
+        "solar_zenith_angle": torch.full((batch_size,), 45.0),
+        "viewing_zenith_angle": torch.full((batch_size,), 30.0),
+        "relative_azimuth_angle": torch.zeros(batch_size),
+        "timestamps": torch.zeros(batch_size),
+        "exposure_time": torch.ones(batch_size),
+        "ccd_temperature": torch.zeros(batch_size),
+    }
+    return gas_columns, instrument_ids, nuisance, context
 
 
 def test_instrument_stray_light_adds_to_predicted_component():
     model = _make_forward_model()
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
 
-    _, diagnostics_without = model(gas_columns, instrument_ids, nuisance)
+    _, diagnostics_without = model(gas_columns, instrument_ids, nuisance, **context)
     torch.testing.assert_close(
         diagnostics_without["stray_light"],
         diagnostics_without["predicted_stray_light"],
@@ -63,6 +71,7 @@ def test_instrument_stray_light_adds_to_predicted_component():
         instrument_ids,
         nuisance,
         instrument_parameters=instrument_parameters,
+        **context,
     )
     torch.testing.assert_close(
         diagnostics_with["instrument_stray_light"],
@@ -77,9 +86,9 @@ def test_instrument_stray_light_adds_to_predicted_component():
 
 def test_instrument_nonlinearity_shapes_detector_response():
     model = _make_forward_model()
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
 
-    _, diagnostics_base = model(gas_columns, instrument_ids, nuisance)
+    _, diagnostics_base = model(gas_columns, instrument_ids, nuisance, **context)
     alpha = 0.02
     instrument_parameters = {0: InstrumentParameters(nonlinear_response=alpha)}
     _, diagnostics_nonlinear = model(
@@ -87,6 +96,7 @@ def test_instrument_nonlinearity_shapes_detector_response():
         instrument_ids,
         nuisance,
         instrument_parameters=instrument_parameters,
+        **context,
     )
 
     torch.testing.assert_close(
@@ -116,13 +126,13 @@ def test_rayleigh_scattering_influences_reconstruction():
     model_with = _make_forward_model(include_rayleigh=True)
     model_without = _make_forward_model(include_rayleigh=False)
 
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model_with)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model_with)
 
     reconstruction_with, diagnostics_with = model_with(
-        gas_columns, instrument_ids, nuisance
+        gas_columns, instrument_ids, nuisance, **context
     )
     reconstruction_without, diagnostics_without = model_without(
-        gas_columns, instrument_ids, nuisance
+        gas_columns, instrument_ids, nuisance, **context
     )
 
     assert "rayleigh_optical_depth" in diagnostics_with
@@ -133,16 +143,19 @@ def test_rayleigh_scattering_influences_reconstruction():
 
 def test_forward_model_derives_air_mass_from_geometry():
     model = _make_forward_model()
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
+    context = {**context}
     solar = torch.tensor([60.0])
     viewing = torch.tensor([30.0])
+    context["solar_zenith_angle"] = solar
+    context["viewing_zenith_angle"] = viewing
+    context["relative_azimuth_angle"] = torch.zeros_like(solar)
 
     _, diagnostics = model(
         gas_columns,
         instrument_ids,
         nuisance,
-        solar_zenith_angle=solar,
-        viewing_zenith_angle=viewing,
+        **context,
     )
 
     expected_total = double_geometric_air_mass_factor(solar, viewing)
@@ -159,18 +172,20 @@ def test_forward_model_derives_air_mass_from_geometry():
 
 def test_forward_model_uses_relative_azimuth_weighting():
     model = _make_forward_model()
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
+    context = {**context}
     solar = torch.tensor([55.0])
     viewing = torch.tensor([40.0])
     relative = torch.tensor([180.0])
+    context["solar_zenith_angle"] = solar
+    context["viewing_zenith_angle"] = viewing
+    context["relative_azimuth_angle"] = relative
 
     _, diagnostics = model(
         gas_columns,
         instrument_ids,
         nuisance,
-        solar_zenith_angle=solar,
-        viewing_zenith_angle=viewing,
-        relative_azimuth_angle=relative,
+        **context,
     )
 
     expected_weight = 0.5 * (1.0 + torch.cos(torch.deg2rad(relative)))
@@ -192,18 +207,20 @@ def test_forward_model_supports_chapman_air_mass_mode():
         air_mass_max_altitude_km=60.0,
         air_mass_num_samples=384,
     )
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
+    context = {**context}
     solar = torch.tensor([70.0])
     viewing = torch.tensor([25.0])
     relative = torch.tensor([120.0])
+    context["solar_zenith_angle"] = solar
+    context["viewing_zenith_angle"] = viewing
+    context["relative_azimuth_angle"] = relative
 
     _, diagnostics = model(
         gas_columns,
         instrument_ids,
         nuisance,
-        solar_zenith_angle=solar,
-        viewing_zenith_angle=viewing,
-        relative_azimuth_angle=relative,
+        **context,
     )
 
     expected_solar = exponential_air_mass_factor(
@@ -236,18 +253,19 @@ def test_forward_model_supports_chapman_air_mass_mode():
 
 def test_air_mass_factor_scales_optical_depth():
     model = _make_forward_model()
-    gas_columns, instrument_ids, nuisance = _dummy_inputs(model)
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
 
     with torch.no_grad():
         model.absorption_matrix.copy_(model.absorption_matrix * 1e6)
 
-    _, diagnostics_base = model(gas_columns, instrument_ids, nuisance)
+    _, diagnostics_base = model(gas_columns, instrument_ids, nuisance, **context)
     amf = torch.tensor([2.0])
     scaled, diagnostics_scaled = model(
         gas_columns,
         instrument_ids,
         nuisance,
         air_mass_factors=amf,
+        **context,
     )
 
     torch.testing.assert_close(
@@ -275,7 +293,8 @@ def test_partial_instrument_parameter_overrides_only_apply_to_matching_ids():
         kernel_size=3,
     )
     with torch.no_grad():
-        model.instrument_embedding.embedding.weight.zero_()
+        gas_columns_dummy, instrument_ids_dummy, nuisance_dummy, context_dummy = _dummy_inputs(model)
+        model(gas_columns_dummy, instrument_ids_dummy, nuisance_dummy, **context_dummy)
         for module in model.nuisance_head:
             if isinstance(module, torch.nn.Linear):
                 module.weight.zero_()
@@ -285,6 +304,7 @@ def test_partial_instrument_parameter_overrides_only_apply_to_matching_ids():
     gas_columns = torch.full((2, len(model.gases)), 0.1)
     nuisance = torch.zeros((2, len(model.gases)))
     instrument_ids = torch.tensor([0, 1], dtype=torch.long)
+    _, _, _, context = _dummy_inputs(model, batch_size=2)
     overrides = {
         1: InstrumentParameters(
             wavelength_offset_nm=0.01,
@@ -296,7 +316,11 @@ def test_partial_instrument_parameter_overrides_only_apply_to_matching_ids():
     }
 
     _, diagnostics = model(
-        gas_columns, instrument_ids, nuisance, instrument_parameters=overrides
+        gas_columns,
+        instrument_ids,
+        nuisance,
+        instrument_parameters=overrides,
+        **context,
     )
 
     torch.testing.assert_close(
@@ -332,4 +356,24 @@ def test_partial_instrument_parameter_overrides_only_apply_to_matching_ids():
     torch.testing.assert_close(
         diagnostics["instrument_nonlinearity"],
         torch.tensor([0.0, 0.01], dtype=diagnostics["instrument_nonlinearity"].dtype),
+    )
+
+
+def test_forward_model_applies_solar_reference_offset():
+    model = _make_forward_model()
+    gas_columns, instrument_ids, nuisance, context = _dummy_inputs(model)
+    solar_reference = torch.linspace(0.1, 0.5, steps=model.wavelengths_nm.numel())
+
+    _, diagnostics = model(
+        gas_columns,
+        instrument_ids,
+        nuisance,
+        solar_reference=solar_reference,
+        **context,
+    )
+
+    assert "solar_reference_log" in diagnostics
+    torch.testing.assert_close(
+        diagnostics["solar_reference_log"][0],
+        solar_reference.to(diagnostics["solar_reference_log"].dtype),
     )

@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from .data.dataset import Level0Dataset
 from .models.encoder import AutoDOASEncoder
 from .models.forward import AutoDOASForwardModel, InstrumentParameters
+from .physics.solar_reference import SharedSolarReference
 
 
 @dataclass
@@ -64,6 +65,7 @@ class PhysicsBasedDOASRetrieval:
         forward_model: AutoDOASForwardModel,
         device: Optional[torch.device] = None,
         default_instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
+        solar_reference: Optional[SharedSolarReference] = None,
     ) -> None:
         self.encoder = encoder
         self.forward_model = forward_model
@@ -73,6 +75,7 @@ class PhysicsBasedDOASRetrieval:
         self._instrument_parameters: Dict[int, InstrumentParameters] = {}
         if default_instrument_parameters is not None:
             self.set_instrument_parameters(default_instrument_parameters)
+        self.solar_reference = solar_reference.to(self.device) if solar_reference is not None else None
         self.to(self.device)
         self.eval()
 
@@ -82,6 +85,8 @@ class PhysicsBasedDOASRetrieval:
         self.device = device
         self.encoder.to(device)
         self.forward_model.to(device)
+        if self.solar_reference is not None:
+            self.solar_reference.to(device)
         return self
 
     def eval(self) -> "PhysicsBasedDOASRetrieval":  # pragma: no cover - trivial wrapper
@@ -100,6 +105,10 @@ class PhysicsBasedDOASRetrieval:
         relative_azimuth_angle: Optional[torch.Tensor] = None,
         air_mass_factors: Optional[torch.Tensor] = None,
         instrument_parameters: Optional[Mapping[int, InstrumentParameters]] = None,
+        timestamps: Optional[torch.Tensor] = None,
+        exposure_time: Optional[torch.Tensor] = None,
+        ccd_temperature: Optional[torch.Tensor] = None,
+        update_solar_reference: bool = False,
         detach: bool = True,
     ) -> RetrievalResult:
         """Execute the full retrieval for a batch of Level-0 counts."""
@@ -119,7 +128,25 @@ class PhysicsBasedDOASRetrieval:
             viewing_zenith_angle = viewing_zenith_angle.to(self.device)
         if relative_azimuth_angle is not None:
             relative_azimuth_angle = relative_azimuth_angle.to(self.device)
+        if timestamps is not None:
+            timestamps = timestamps.to(self.device)
+        if exposure_time is not None:
+            exposure_time = exposure_time.to(self.device)
+        if ccd_temperature is not None:
+            ccd_temperature = ccd_temperature.to(self.device)
         instrument_parameters = self._resolve_instrument_parameters(instrument_parameters)
+        solar_reference_log = None
+        if self.solar_reference is not None:
+            if update_solar_reference:
+                solar_reference_log = self.solar_reference.update(
+                    counts.detach(),
+                    solar_zenith_angle=solar_zenith_angle.detach()
+                    if solar_zenith_angle is not None
+                    else None,
+                )
+            else:
+                solar_reference_log = self.solar_reference.reference()
+            solar_reference_log = solar_reference_log.to(self.device, dtype=counts.dtype)
         reconstruction, diagnostics = self.forward_model(
             gas_columns,
             instrument_ids,
@@ -129,6 +156,10 @@ class PhysicsBasedDOASRetrieval:
             solar_zenith_angle=solar_zenith_angle,
             viewing_zenith_angle=viewing_zenith_angle,
             relative_azimuth_angle=relative_azimuth_angle,
+            timestamps=timestamps,
+            exposure_time=exposure_time,
+            ccd_temperature=ccd_temperature,
+            solar_reference=solar_reference_log,
         )
 
         if "air_mass_factor" in diagnostics:
@@ -172,12 +203,18 @@ class PhysicsBasedDOASRetrieval:
         solar_zenith_angle = batch.get("solar_zenith_angle")
         viewing_zenith_angle = batch.get("viewing_zenith_angle")
         relative_azimuth_angle = batch.get("relative_azimuth_angle")
+        timestamps = batch.get("timestamp")
+        exposure = batch.get("exposure_time")
+        temperature = batch.get("ccd_temperature")
         return self.run(
             counts,
             instrument_ids,
             solar_zenith_angle=solar_zenith_angle,
             viewing_zenith_angle=viewing_zenith_angle,
             relative_azimuth_angle=relative_azimuth_angle,
+            timestamps=timestamps,
+            exposure_time=exposure,
+            ccd_temperature=temperature,
             instrument_parameters=instrument_parameters,
         )
 
@@ -204,6 +241,20 @@ class PhysicsBasedDOASRetrieval:
         """Remove all stored default instrument parameters."""
 
         self._instrument_parameters.clear()
+        return self
+
+    def set_solar_reference(
+        self, solar_reference: SharedSolarReference
+    ) -> "PhysicsBasedDOASRetrieval":
+        """Attach a shared solar reference model used during retrieval."""
+
+        self.solar_reference = solar_reference.to(self.device)
+        return self
+
+    def clear_solar_reference(self) -> "PhysicsBasedDOASRetrieval":
+        """Detach the shared solar reference model."""
+
+        self.solar_reference = None
         return self
 
     def _resolve_instrument_parameters(

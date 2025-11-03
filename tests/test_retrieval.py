@@ -40,13 +40,28 @@ def _make_forward_model(num_instruments: int = 2, **kwargs) -> AutoDOASForwardMo
         **kwargs,
     )
     with torch.no_grad():
-        model.instrument_embedding.embedding.weight.zero_()
+        gas_columns = torch.full((1, len(model.gases)), 0.1)
+        nuisance = torch.zeros((1, len(model.gases)))
+        instrument_ids = torch.zeros(1, dtype=torch.long)
+        context = _default_context()
+        model(gas_columns, instrument_ids, nuisance, **context)
         for module in model.nuisance_head:
             if isinstance(module, torch.nn.Linear):
                 module.weight.zero_()
                 module.bias.zero_()
     model.eval()
     return model
+
+
+def _default_context(batch_size: int = 1):
+    return {
+        "solar_zenith_angle": torch.full((batch_size,), 45.0),
+        "viewing_zenith_angle": torch.full((batch_size,), 30.0),
+        "relative_azimuth_angle": torch.zeros(batch_size),
+        "timestamps": torch.zeros(batch_size),
+        "exposure_time": torch.ones(batch_size),
+        "ccd_temperature": torch.zeros(batch_size),
+    }
 
 
 def _make_retrieval(default_params=None) -> PhysicsBasedDOASRetrieval:

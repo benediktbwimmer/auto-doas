@@ -22,6 +22,8 @@ class Level0Spectrum:
     ccd_temperature: float
     viewing_zenith_angle: Optional[float] = None
     relative_azimuth_angle: Optional[float] = None
+    pgn_no2_vcd: Optional[float] = None
+    pgn_no2_weight: Optional[float] = None
 
 
 class Level0Dataset(Dataset):
@@ -49,7 +51,7 @@ class Level0Dataset(Dataset):
         sza = torch.tensor([item.solar_zenith_angle for item in batch], dtype=torch.float32)
         exposure = torch.tensor([item.exposure_time for item in batch], dtype=torch.float32)
         temperature = torch.tensor([item.ccd_temperature for item in batch], dtype=torch.float32)
-        return {
+        payload = {
             "counts": counts,
             "wavelengths_nm": wavelengths,
             "instrument_id": instrument_ids,
@@ -72,3 +74,12 @@ class Level0Dataset(Dataset):
                 else {}
             ),
         }
+        if all(item.pgn_no2_vcd is not None for item in batch):
+            payload["pgn_no2_vcd"] = torch.tensor(
+                [item.pgn_no2_vcd for item in batch], dtype=torch.float32
+            )
+            if all(item.pgn_no2_weight is not None for item in batch):
+                payload["pgn_no2_weight"] = torch.tensor(
+                    [item.pgn_no2_weight for item in batch], dtype=torch.float32
+                )
+        return payload

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -18,12 +18,24 @@ class AutoDOASLoss:
         lambda_cons: float = 0.2,
         lambda_theta: float = 0.05,
         lambda_nn: float = 0.01,
+        lambda_mean: float = 0.0,
+        mean_target: float = 0.0,
+        calibration_prior_scale: float = 0.0,
+        calibration_prior_bias: float = 0.0,
+        log_calibration_scale: Optional[torch.Tensor] = None,
+        calibration_bias: Optional[torch.Tensor] = None,
     ) -> None:
         self.lambda_high = lambda_high
         self.lambda_c = lambda_c
         self.lambda_cons = lambda_cons
         self.lambda_theta = lambda_theta
         self.lambda_nn = lambda_nn
+        self.lambda_mean = lambda_mean
+        self.mean_target = mean_target
+        self.calibration_prior_scale = calibration_prior_scale
+        self.calibration_prior_bias = calibration_prior_bias
+        self.register_scale = log_calibration_scale
+        self.register_bias = calibration_bias
 
     @staticmethod
     def high_pass(signal: torch.Tensor, kernel_size: int = 7) -> torch.Tensor:
@@ -50,6 +62,8 @@ class AutoDOASLoss:
         consistency = F.l1_loss(gas_columns, neighbor_columns)
         sparsity = torch.mean(torch.abs(gas_columns))
         inst_reg = torch.mean(instrument_regularizer)
+        column_mean_penalty = torch.mean(gas_columns, dim=0) - self.mean_target
+        column_mean_penalty = torch.mean(column_mean_penalty**2)
         total = (
             recon_loss
             + self.lambda_high * hp_recon_loss
@@ -57,7 +71,12 @@ class AutoDOASLoss:
             + self.lambda_cons * consistency
             + self.lambda_theta * inst_reg
             + self.lambda_nn * sparsity
+            + self.lambda_mean * column_mean_penalty
         )
+        if self.calibration_prior_scale > 0 and self.register_scale is not None:
+            total = total + self.calibration_prior_scale * torch.sum(self.register_scale**2)
+        if self.calibration_prior_bias > 0 and self.register_bias is not None:
+            total = total + self.calibration_prior_bias * torch.sum(self.register_bias**2)
         return {
             "total": total,
             "reconstruction": recon_loss,
@@ -66,4 +85,5 @@ class AutoDOASLoss:
             "consistency": consistency,
             "instrument_regularizer": inst_reg,
             "sparsity": sparsity,
+            "column_mean": column_mean_penalty,
         }
